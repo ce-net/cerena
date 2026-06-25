@@ -271,9 +271,9 @@ mod tests {
         // 100 - 70 = 30 → Quarantine band (<= 40).
         assert_eq!(u1.action, KarmaAction::Quarantine, "got {:?} at karma {}", u1.action, u1.karma);
 
-        // Sustained near-certain detection: another big hit pushes into TempBan.
-        let u2 = l.fuse(&p, Some(&susp("suspect", 0.97)), 0.0, 2000).expect("update emitted");
-        // 30 - 160 clamps but lands well below the temp-ban line (<= 10).
+        // A second sustained detection pushes from Quarantine down into TempBan.
+        let u2 = l.fuse(&p, Some(&susp("suspect", 0.9)), 0.0, 2000).expect("update emitted");
+        // 30 - 70 = -40 → TempBan band (<= 10, still above the perm-ban line at -50).
         assert_eq!(u2.action, KarmaAction::TempBan, "got {:?} at karma {}", u2.action, u2.karma);
 
         // Audit log recorded both.

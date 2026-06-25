@@ -71,11 +71,11 @@ const BRIGADE_PROTECT_KARMA: i32 = 90;
 /// involved are flagged as a probable brigade.
 const BRIGADE_PRESSURE_THRESHOLD: f32 = 2.0;
 
-/// One stored, weighted report.
+/// One stored, weighted report. The reason is folded into `weight` at filing time via
+/// [`reason_severity`], so it is not retained separately.
 #[derive(Debug, Clone)]
 struct StoredReport {
     reporter: NodeId,
-    reason: ReportReason,
     /// Combined credibility * severity weight at filing time.
     weight: f32,
     /// Round (tick) the report was filed at, for decay.
@@ -115,7 +115,6 @@ impl ReportAggregator {
             .or_default()
             .push(StoredReport {
                 reporter: report.reporter.clone(),
-                reason: report.reason,
                 weight,
                 tick: report.tick,
             });
