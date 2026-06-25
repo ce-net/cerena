@@ -1,0 +1,21 @@
+[package]
+name = "arena-mesh"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CE mesh integration: zone authority assignment, transport adapters, capability auth, discovery."
+
+[dependencies]
+arena-protocol = { path = "../arena-protocol" }
+ce_rs.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+anyhow.workspace = true
+sha2.workspace = true
+hex.workspace = true

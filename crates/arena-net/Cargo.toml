@@ -1,0 +1,15 @@
+[package]
+name = "arena-net"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Netcode: snapshot delta baselines, entity interpolation, client prediction + reconciliation, lag compensation."
+
+[dependencies]
+arena-protocol = { path = "../arena-protocol" }
+arena-sim = { path = "../arena-sim" }
+glam.workspace = true
+serde.workspace = true
+tracing.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "arena-sim"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic fixed-timestep FPS simulation: movement, collision, ballistics, damage."
+
+[dependencies]
+arena-protocol = { path = "../arena-protocol" }
+glam.workspace = true
+serde.workspace = true
+tracing.workspace = true
+sha2.workspace = true

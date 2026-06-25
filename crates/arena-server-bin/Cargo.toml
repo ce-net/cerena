@@ -1,0 +1,22 @@
+[package]
+name = "arena-server-bin"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Binary entrypoint: run an Arena zone/coordinator authority on this CE node."
+
+[[bin]]
+name = "arena-server"
+path = "src/main.rs"
+
+[dependencies]
+arena-protocol = { path = "../arena-protocol" }
+arena-server = { path = "../arena-server" }
+arena-mesh = { path = "../arena-mesh" }
+arena-karma = { path = "../arena-karma" }
+ce_rs.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true

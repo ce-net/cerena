@@ -1,0 +1,25 @@
+[package]
+name = "arena-server"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The authoritative zone server: runs the sim, owns AOI snapshots, applies inputs, hand-off, anti-cheat hooks."
+
+[dependencies]
+arena-protocol = { path = "../arena-protocol" }
+arena-sim = { path = "../arena-sim" }
+arena-net = { path = "../arena-net" }
+arena-karma = { path = "../arena-karma" }
+arena-mesh = { path = "../arena-mesh" }
+ce_rs.workspace = true
+glam.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+anyhow.workspace = true
+sha2.workspace = true
+hex.workspace = true
+fastrand.workspace = true

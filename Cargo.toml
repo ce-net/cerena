@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/arena-protocol",
+    "crates/arena-sim",
+    "crates/arena-net",
+    "crates/arena-server",
+    "crates/arena-karma",
+    "crates/arena-mesh",
+    "crates/arena-client",
+    "crates/arena-server-bin",
+]
+
+# arena-client targets wasm32 + native; keep it out of the default `cargo build`
+# unless explicitly selected so a server build never drags wgpu in.
+default-members = [
+    "crates/arena-protocol",
+    "crates/arena-sim",
+    "crates/arena-net",
+    "crates/arena-server",
+    "crates/arena-karma",
+    "crates/arena-mesh",
+    "crates/arena-server-bin",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+authors = ["Leif Rydenfalk <ledamecrydenfalk@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/ce-net/ce-arena"
+
+[workspace.dependencies]
+# Shared math. glam is the de-facto standard; serde feature for wire encoding.
+# NOTE on determinism: glam f32 ops are NOT bit-identical across architectures.
+# A zone is simulated by a SINGLE authority, so intra-zone determinism is not
+# required for normal play. Cross-validation (arena-karma) tolerates a small
+# epsilon; if we ever need bit-exact replay we swap the math layer for fixed-point.
+glam = { version = "0.27", features = ["serde", "bytemuck"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+futures-util = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+hex = "0.4"
+sha2 = "0.10"
+fastrand = "2"
+
+# Local SDK (mesh transport, identity, economy). Path dep by design.
+ce_rs = { path = "../ce-rs", features = ["serve"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1

@@ -1,0 +1,34 @@
+[package]
+name = "arena-client"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "wgpu + wasm FPS client: renderer, input, prediction loop, HUD."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+arena-protocol = { path = "../arena-protocol" }
+arena-sim = { path = "../arena-sim" }
+arena-net = { path = "../arena-net" }
+glam.workspace = true
+serde.workspace = true
+bytemuck.workspace = true
+wgpu = "0.20"
+winit = "0.29"
+tracing.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "WebSocket", "MessageEvent", "BinaryType", "Blob", "Performance"] }
+console_error_panic_hook = "0.1"
+tracing-wasm = "0.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "0.3"
+env_logger = "0.11"

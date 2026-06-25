@@ -1,0 +1,15 @@
+[package]
+name = "arena-protocol"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire protocol, shared types, and tunables for the CE Arena distributed FPS."
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true
+bincode.workspace = true
+thiserror.workspace = true
+bytemuck.workspace = true
