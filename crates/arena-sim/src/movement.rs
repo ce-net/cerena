@@ -149,15 +149,13 @@ pub fn move_player(
     }
 
     let mut vel = state.vel;
-    let mut on_ground = on_ground_prev;
 
-    if on_ground {
+    if on_ground_prev {
         apply_friction(&mut vel, dt);
         accelerate(&mut vel, wishdir, wishspeed, GROUND_ACCEL, dt);
-        // Jump leaves the ground; we re-derive grounding after the sweep.
+        // Jump leaves the ground; grounding is re-derived from the sweep below.
         if frame.buttons.has(Buttons::JUMP) {
             vel.y = JUMP_IMPULSE;
-            on_ground = false;
         }
     } else {
         // Air-strafe: full directional control but only a capped speed add.
