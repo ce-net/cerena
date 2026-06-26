@@ -14,10 +14,11 @@
 
 use glam::Vec3;
 
-use arena_protocol::weapon::{DamageKind, WeaponDef};
+use arena_protocol::weapon::WeaponDef;
+use arena_protocol::world::{Aabb, Team};
 use arena_protocol::{EntityId, Tick};
 
-use crate::collision::{self};
+use crate::collision;
 
 /// Per-player combat bookkeeping, stored in the world alongside entity state.
 #[derive(Debug, Clone)]
@@ -211,15 +212,8 @@ fn unit_f32(h: u64) -> f32 {
     ((h >> 40) as f32) / (1u64 << 24) as f32
 }
 
-// Re-export the AABB type name locally for the hitscan signature.
-use arena_protocol::world::Aabb;
-
 /// True if a shooter on `shooter_team` may damage a target on `target_team`.
 /// Free-for-all (`Team::None` on either side) means everyone is fair game.
-pub fn can_damage(
-    shooter_team: arena_protocol::world::Team,
-    target_team: arena_protocol::world::Team,
-) -> bool {
-    use arena_protocol::world::Team;
+pub fn can_damage(shooter_team: Team, target_team: Team) -> bool {
     shooter_team == Team::None || target_team == Team::None || shooter_team != target_team
 }

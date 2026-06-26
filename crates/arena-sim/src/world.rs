@@ -588,7 +588,10 @@ impl World {
             h.update(e.flags.0.to_le_bytes());
             h.update([e.weapon, e.team as u8]);
         }
-        h.finalize().into()
+        let digest = h.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        out
     }
 
     // --- internals ----------------------------------------------------------
