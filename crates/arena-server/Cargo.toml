@@ -13,6 +13,8 @@ arena-sim = { path = "../arena-sim" }
 arena-net = { path = "../arena-net" }
 arena-karma = { path = "../arena-karma" }
 arena-mesh = { path = "../arena-mesh" }
+arena-content = { path = "../arena-content" }
+arena-procgen = { path = "../arena-procgen" }
 ce_rs.workspace = true
 glam.workspace = true
 serde.workspace = true
