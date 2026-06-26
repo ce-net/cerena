@@ -19,3 +19,4 @@ futures-util.workspace = true
 anyhow.workspace = true
 sha2.workspace = true
 hex.workspace = true
+thiserror.workspace = true
