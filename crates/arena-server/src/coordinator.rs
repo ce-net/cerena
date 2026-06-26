@@ -24,7 +24,7 @@ use arena_protocol::{NodeId, Tick};
 use arena_content::hotreload::ContentVersion;
 use arena_content::ContentPack;
 
-use arena_mesh::{verify_ticket, ZoneRouter};
+use arena_mesh::verify_ticket;
 
 /// The zone new (non-quarantined) players spawn into — the session's central arena cell.
 pub const SPAWN_ZONE: ZoneId = ZoneId { x: 0, z: 0 };
@@ -99,18 +99,22 @@ impl Coordinator {
 
     /// Decide whether to admit a joining player and where to put them.
     ///
-    /// `from` is the **authenticated** sender node id; `router` answers which node currently
-    /// owns the chosen spawn zone; `me` is this node's id (used as the authority fallback
-    /// when discovery has not yet populated any candidates).
-    pub fn handle_join(
+    /// `from` is the **authenticated** sender node id; `authority_for` answers which node
+    /// currently owns a given zone (the engine supplies the manager's HRW router without
+    /// exposing it); `me` is this node's id (the authority fallback when discovery has not yet
+    /// populated any candidates).
+    pub fn handle_join<F>(
         &mut self,
         ticket: &SessionTicket,
         team_pref: Option<Team>,
         from: &NodeId,
-        router: &ZoneRouter,
         me: &NodeId,
         now_unix: u64,
-    ) -> JoinDecision {
+        authority_for: F,
+    ) -> JoinDecision
+    where
+        F: Fn(ZoneId) -> Option<NodeId>,
+    {
         // 1. Ticket: verified unless explicitly relaxed for local e2e fleets.
         if !self.e2e_insecure {
             if let Err(e) = verify_ticket(ticket, now_unix) {
@@ -141,7 +145,7 @@ impl Coordinator {
 
         // 3. Authority for the spawn zone (HRW). With no discovered candidates yet, we host
         //    it ourselves — a freshly-booted coordinator is also the bootstrap authority.
-        let authority = router.authority_for(zone).unwrap_or_else(|| me.clone());
+        let authority = authority_for(zone).unwrap_or_else(|| me.clone());
         let team = team_pref.unwrap_or(Team::None);
 
         JoinDecision::Accept { zone, authority, team }
@@ -217,7 +221,7 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arena_mesh::Candidate;
+    use arena_mesh::{assign_authority, Candidate};
 
     fn ticket(player: &str, session: &SessionId, expires_at: u64) -> SessionTicket {
         SessionTicket {
