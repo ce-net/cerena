@@ -71,6 +71,10 @@ pub struct PlayerSlot {
     /// Queued input frames not yet applied, oldest first. The hot path keeps only the
     /// newest unapplied frame per tick; this buffer absorbs packet jitter/reorder.
     pub pending: Vec<InputFrame>,
+    /// The most recent frame actually fed to the sim, retained so we can publish it in a
+    /// [`VerifyTick`](arena_protocol::message::AuthorityMsg::VerifyTick) for cross-validation
+    /// (the `World` keeps applied inputs private, so the slot mirrors it).
+    last_applied: Option<InputFrame>,
     /// Per-round telemetry accumulator, flushed to [`AntiCheat`] every [`ROUND_TICKS`].
     round_telemetry: CheatCounters,
 }
@@ -83,6 +87,7 @@ impl PlayerSlot {
             last_seen_tick: tick,
             aoi: HashSet::new(),
             pending: Vec::new(),
+            last_applied: None,
             round_telemetry: CheatCounters::default(),
         }
     }
@@ -191,7 +196,7 @@ impl ZoneSim {
     pub fn applied_inputs(&self) -> Vec<(NodeId, InputFrame)> {
         let mut out = Vec::with_capacity(self.players.len());
         for (node, slot) in &self.players {
-            if let Some(frame) = self.world.input_snapshot(slot.entity) {
+            if let Some(frame) = slot.last_applied {
                 out.push((node.clone(), frame));
             }
         }
@@ -210,6 +215,7 @@ impl ZoneSim {
             if let Some(frame) = slot.pending.iter().copied().max_by_key(|f| f.seq) {
                 self.world.set_input(slot.entity, frame);
                 slot.last_input_seq = slot.last_input_seq.max(frame.seq);
+                slot.last_applied = Some(frame);
             }
             slot.pending.clear();
         }
