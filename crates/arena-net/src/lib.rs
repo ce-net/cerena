@@ -82,5 +82,5 @@ pub use baseline::BaselineStore;
 pub use client::ClientWorld;
 pub use clock::ClockSync;
 pub use interp::{INTERP_DELAY_TICKS, InterpolationBuffer};
-pub use predict::{LocalSim, Predictor};
+pub use predict::{LocalSim, Predictor, SimReplay};
 pub use server::SnapshotEncoder;
