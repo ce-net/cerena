@@ -29,6 +29,16 @@ pub struct Camera {
     /// AOI spans neighbours, so the visible world can be a few hundred metres deep.
     pub znear: f32,
     pub zfar: f32,
+
+    // --- transient game-feel offsets, written each frame by `crate::feedback` ---
+    /// Positional shake offset (world metres) added to the eye this frame.
+    pub shake_pos: Vec3,
+    /// Additive look-angle jitter (radians) from shake + weapon/impact kick.
+    pub shake_yaw: f32,
+    pub shake_pitch: f32,
+    /// Camera roll (radians) — banking the horizon on a big shake. Pure feel; never
+    /// affects the look ray the input layer sends, so aim stays honest.
+    pub shake_roll: f32,
 }
 
 impl Default for Camera {
@@ -40,16 +50,22 @@ impl Default for Camera {
             fov: crate::DEFAULT_FOV_Y,
             znear: 0.05,
             zfar: 1000.0,
+            shake_pos: Vec3::ZERO,
+            shake_yaw: 0.0,
+            shake_pitch: 0.0,
+            shake_roll: 0.0,
         }
     }
 }
 
 impl Camera {
-    /// The unit forward (look) direction from yaw/pitch. Mirrors
-    /// [`EntityState::view_dir`] so the camera ray equals the server's fire ray.
+    /// The unit forward (look) direction from yaw/pitch, *including* the transient
+    /// shake/kick jitter. This is the direction the camera renders along; the input
+    /// layer still sends the un-shaken `yaw`/`pitch`, so what the server hit-tests is
+    /// the player's true aim, not the cosmetic wobble.
     pub fn forward(&self) -> Vec3 {
-        let (sy, cy) = self.yaw.sin_cos();
-        let (sp, cp) = self.pitch.sin_cos();
+        let (sy, cy) = (self.yaw + self.shake_yaw).sin_cos();
+        let (sp, cp) = (self.pitch + self.shake_pitch).sin_cos();
         Vec3::new(sy * cp, sp, -cy * cp).normalize_or_zero()
     }
 
@@ -63,9 +79,17 @@ impl Camera {
         self.pitch = local.pitch;
     }
 
-    /// Right-handed view matrix (world -> view).
+    /// Right-handed view matrix (world -> view). Applies the positional shake offset
+    /// to the eye and banks the up-vector by `shake_roll` so a heavy hit visibly
+    /// rolls the horizon.
     pub fn view(&self) -> Mat4 {
-        Mat4::look_to_rh(self.pos, self.forward(), Vec3::Y)
+        let fwd = self.forward();
+        let up = if self.shake_roll.abs() > 1e-5 {
+            glam::Quat::from_axis_angle(fwd, self.shake_roll) * Vec3::Y
+        } else {
+            Vec3::Y
+        };
+        Mat4::look_to_rh(self.pos + self.shake_pos, fwd, up)
     }
 
     /// Right-handed perspective projection (view -> clip) for the given aspect.

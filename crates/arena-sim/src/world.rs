@@ -29,7 +29,7 @@ use arena_content::tech::TechEffect;
 
 use arena_protocol::entity::{EntityFlags, EntityKind, EntityState};
 use arena_protocol::input::{Buttons, InputFrame};
-use arena_protocol::snapshot::GameEvent;
+use arena_protocol::snapshot::{GameEvent, MeleeKind};
 use arena_protocol::world::Team;
 use arena_protocol::{EntityId, NodeId, TICK_DT, TICK_HZ, Tick};
 
@@ -198,6 +198,14 @@ pub struct World {
     shields: HashMap<EntityId, (f32, Tick)>,
     /// Combo / synergy marks: tag -> expire tick.
     marks: HashMap<EntityId, HashMap<String, Tick>>,
+    /// Per-entity item-proc bookkeeping (internal cooldowns + interval accumulators).
+    proc_rt: HashMap<EntityId, crate::item_procs::ProcRuntime>,
+    /// Temporary flat stat buffs granted by procs: `(mods, expire_tick)`. Folded into
+    /// `combined_mods` so a "Berserk on crit" surge is felt by every downstream system.
+    temp_buffs: HashMap<EntityId, Vec<(StatMods, Tick)>>,
+    /// Reentrancy guard so a damage proc (nova/chain) does not recursively trigger more
+    /// on-hit/on-take-damage procs and loop forever.
+    proc_depth: u32,
     /// The player's ordered action bar of abilities (FIRE casts the selected slot).
     ability_bar: HashMap<EntityId, Vec<AbilityId>>,
     /// Per-ability cooldown ready-ticks.
@@ -220,6 +228,9 @@ pub struct World {
     telemetry: HashMap<EntityId, TelemetryAccumulator>,
     respawn_at: HashMap<EntityId, Tick>,
     history: VecDeque<HistoryFrame>,
+    /// The living world — seasons, leylines, weather, ecology, and the Chronicle that
+    /// turns deeds into legends. Deterministic in the tick + the deeds this sim feeds it.
+    pub living: crate::living::LivingWorld,
     tick: Tick,
     next_id: EntityId,
 }
@@ -239,6 +250,9 @@ impl Clone for World {
             statuses: self.statuses.clone(),
             shields: self.shields.clone(),
             marks: self.marks.clone(),
+            proc_rt: self.proc_rt.clone(),
+            temp_buffs: self.temp_buffs.clone(),
+            proc_depth: 0,
             ability_bar: self.ability_bar.clone(),
             ability_cooldowns: self.ability_cooldowns.clone(),
             move_cooldowns: self.move_cooldowns.clone(),
@@ -255,6 +269,7 @@ impl Clone for World {
             telemetry: self.telemetry.clone(),
             respawn_at: self.respawn_at.clone(),
             history: self.history.clone(),
+            living: self.living.clone(),
             tick: self.tick,
             next_id: self.next_id,
         }
@@ -264,15 +279,21 @@ impl Clone for World {
 impl World {
     /// Build an empty world on `map` driven by `content` (the active content pack).
     pub fn new(map: MapDef, content: ContentRegistry) -> World {
+        // Seed the living world from the active pack's bestiary + a ring of leyline wells.
+        let living = crate::living::LivingWorld::new(content.pack());
         World {
             map,
             content,
+            living,
             entities: HashMap::new(),
             rpg: HashMap::new(),
             inventory: HashMap::new(),
             statuses: HashMap::new(),
             shields: HashMap::new(),
             marks: HashMap::new(),
+            proc_rt: HashMap::new(),
+            temp_buffs: HashMap::new(),
+            proc_depth: 0,
             ability_bar: HashMap::new(),
             ability_cooldowns: HashMap::new(),
             move_cooldowns: HashMap::new(),
@@ -450,6 +471,10 @@ impl World {
         let mut events: Vec<GameEvent> = Vec::new();
         let mut deaths: Vec<(EntityId, EntityId)> = Vec::new();
 
+        // 0.5 The living world turns: advance seasons, leylines, weather, and ecology,
+        // and surface its news (season turns, festivals, blooms) as world chat lines.
+        self.advance_living(now, &mut events);
+
         let player_ids: Vec<EntityId> = self
             .entities
             .iter()
@@ -460,6 +485,10 @@ impl World {
         // 1. Regen pools + tick status effects (DoT/regen/mana-burn + expiry).
         self.regen_pools(&player_ids);
         self.tick_statuses(now, &player_ids, &mut events);
+
+        // 1.5 Item-proc heartbeat: advance internal cooldowns, expire temp buffs, and
+        // fire Aura/Interval procs (a Pyrelord's wardlight, Ember Striders' fire trail).
+        self.tick_item_procs(&player_ids, &mut events);
 
         // 2. Movement (base locomotion + status modifiers + parkour modes).
         self.movement_step(now, &player_ids, &mut events);
@@ -476,8 +505,13 @@ impl World {
         // 6. Delayed / repeated effects whose time has come.
         self.run_scheduled(now, &mut events);
 
-        // 7. Deaths -> kill credit + loot drop (and summon/mob cleanup).
+        // 7. Deaths -> kill credit + loot drop (and summon/mob cleanup). This also feeds
+        // slayings to the Chronicle, which may mint legends and queue world-imprints.
         self.process_deaths(now, &mut events, &mut deaths);
+
+        // 7.5 Realise the Chronicle's world-imprints: rising named foes, relic sites,
+        // haunted/hallowed ground born from the deeds just recorded.
+        self.realise_world_imprints(now, &mut events);
 
         // 8. Loot pickup by proximity.
         self.pickup_loot(&mut events);
@@ -675,12 +709,45 @@ impl World {
                         .is_some()
                 })
                 .unwrap_or(false);
+            let mut wall_running = false;
             if airborne && touching_wall && frame.buttons.has(Buttons::SPRINT) {
                 if let Some(gm) = modes.iter().find_map(|m| match &m.kind {
                     MovementKind::WallRun { gravity_mult, .. } => Some(*gravity_mult),
                     _ => None,
                 }) {
                     gravity_mult = gravity_mult.min(gm);
+                    wall_running = true;
+                }
+            }
+
+            // Wall-climb: a Climb mode, airborne, hugging a wall while pushing into it
+            // (FORWARD). Drives the capsule straight up the surface (see MoveParams).
+            let mut climb_speed = 0.0;
+            if touching_wall && airborne && frame.buttons.has(Buttons::FORWARD) && !wall_running {
+                if let Some(speed) = modes.iter().find_map(|m| match &m.kind {
+                    MovementKind::Climb { speed } => Some(*speed),
+                    _ => None,
+                }) {
+                    climb_speed = speed;
+                }
+            }
+
+            // Flight: a Fly mode unlocked and the fly intent held, with per-tick mana
+            // upkeep. If the wizard cannot pay, flight cuts out and gravity returns.
+            let mut fly = false;
+            let mut fly_speed = 0.0;
+            let mut fly_accel = 0.0;
+            if frame.buttons.has(Buttons::FLY) && !sm.rooted {
+                if let Some(def) = modes.iter().find(|m| matches!(m.kind, MovementKind::Fly { .. })) {
+                    if let MovementKind::Fly { speed, accel, .. } = &def.kind {
+                        let cost = def.mana_cost * TICK_DT;
+                        let paid = self.rpg.get_mut(id).map(|r| r.try_spend_mana(cost)).unwrap_or(false);
+                        if paid {
+                            fly = true;
+                            fly_speed = *speed;
+                            fly_accel = *accel;
+                        }
+                    }
                 }
             }
 
@@ -690,11 +757,22 @@ impl World {
                 speed_scale: sm.speed_scale,
                 gravity_mult,
                 rooted: sm.rooted,
+                fly,
+                fly_speed,
+                fly_accel,
+                climb_speed,
             };
+
+            // The melee-swing flag is a one-tick pulse: clear it before this tick's
+            // activations so a fresh swing (below) lights it for exactly one tick.
+            if let Some(e) = self.entities.get_mut(id) {
+                e.flags.set(EntityFlags::MELEEING, false);
+            }
 
             // --- Pre-move discrete activations (edge-triggered) ---------------
             let jump_edge = frame.buttons.has(Buttons::JUMP) && (prev & Buttons::JUMP == 0);
             let crouch_edge = frame.buttons.has(Buttons::CROUCH) && (prev & Buttons::CROUCH == 0);
+            let move_edge = frame.buttons.has(Buttons::MOVE_ABILITY) && (prev & Buttons::MOVE_ABILITY == 0);
             let melee_edge = frame.buttons.has(Buttons::MELEE) && (prev & Buttons::MELEE == 0);
             let aim = self
                 .entities
@@ -720,12 +798,33 @@ impl World {
                     self.try_activate_mode(*id, def, aim, on_ground_prev, &brushes, now, events);
                 }
             }
-            // MELEE casts the selected movement mode (dash/blink/grapple/climb): the
-            // "movement abilities via the slot" hook. weapon_slot selects which mode.
-            if melee_edge && !modes.is_empty() {
-                let sel = (frame.weapon_slot as usize) % modes.len();
-                let def = modes[sel].clone();
-                self.try_activate_mode(*id, &def, aim, on_ground_prev, &brushes, now, events);
+            // MOVE_ABILITY activates the selected discrete movement ability. The
+            // weapon_slot cycles among the *burst* modes (dash / blink / grapple /
+            // momentum surge); continuous modes (sprint/glide/wall-run/fly/climb) are
+            // driven by their own intents above, not by this key.
+            if move_edge {
+                let bursts: Vec<MovementModeDef> = modes
+                    .iter()
+                    .filter(|m| {
+                        matches!(
+                            m.kind,
+                            MovementKind::Dash { .. }
+                                | MovementKind::Blink { .. }
+                                | MovementKind::Grapple { .. }
+                                | MovementKind::MomentumBoost { .. }
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                if !bursts.is_empty() {
+                    let sel = (frame.weapon_slot as usize) % bursts.len();
+                    let def = bursts[sel].clone();
+                    self.try_activate_mode(*id, &def, aim, on_ground_prev, &brushes, now, events);
+                }
+            }
+            // MELEE swings the equipped weapon (sword fighting: combo'd arc strikes).
+            if melee_edge {
+                self.melee_attack(*id, now, events);
             }
 
             // --- Base locomotion sweep ----------------------------------------
@@ -733,6 +832,11 @@ impl World {
                 let e = self.entities.get_mut(id).unwrap();
                 movement::move_player(e, &frame, TICK_DT, on_ground_prev, &brushes, &params)
             };
+
+            // Wall-run is a transient pose flag (move_player owns the rest).
+            if let Some(e) = self.entities.get_mut(id) {
+                e.flags.set(EntityFlags::WALLRUNNING, wall_running && !status.on_ground);
+            }
 
             // Reset air jumps and resolve a pending ground-slam on landing.
             if status.on_ground {
@@ -815,6 +919,115 @@ impl World {
         if act.used {
             let cd = magic::secs_to_ticks(def.cooldown).max(1);
             self.move_cooldowns.entry(id).or_default().insert(key, now + cd);
+        }
+    }
+
+    /// A melee weapon strike: a damaging arc swept in front of `attacker`, with a
+    /// combo that escalates Slash -> Thrust -> Spin as swings chain inside the combo
+    /// window, growing in damage, arc width and knockback. Gated by a per-swing
+    /// cooldown (attack speed). Emits a [`GameEvent::Melee`] for the swing arc and a
+    /// [`GameEvent::Knockback`] per struck foe, so the whole exchange has feedback.
+    fn melee_attack(&mut self, attacker: EntityId, now: Tick, events: &mut Vec<GameEvent>) {
+        if self.entities.get(&attacker).map(|e| !e.is_alive()).unwrap_or(true) {
+            return;
+        }
+        // Swing-recovery gate (attack speed), keyed alongside movement cooldowns.
+        let key = "_melee".to_string();
+        let ready = self
+            .move_cooldowns
+            .get(&attacker)
+            .and_then(|m| m.get(&key))
+            .map_or(true, |&t| now >= t);
+        if !ready {
+            return;
+        }
+
+        let t = self.content.pack().tuning.clone();
+        let combo_window = magic::secs_to_ticks(t.melee_combo_window_s).max(1);
+
+        // Advance the combo (resetting if the window lapsed), in a tight borrow scope.
+        let step = {
+            let rt = self.move_runtime.entry(attacker).or_default();
+            if now.saturating_sub(rt.melee_last_tick) > combo_window {
+                rt.melee_combo = 0;
+            }
+            let step = rt.melee_combo;
+            rt.melee_last_tick = now;
+            rt.melee_combo = (rt.melee_combo + 1) % 3;
+            step
+        };
+
+        // Damage scales with the wielder's power and the combo step.
+        let power_bonus = self
+            .combined_mods(attacker)
+            .and_then(|m| self.rpg.get(&attacker).map(|r| r.derived(&m)))
+            .map(|d| d.power)
+            .unwrap_or(0.0);
+        let combo_mult = 1.0 + t.melee_combo_mult * step as f32;
+        let damage = (t.melee_damage + power_bonus * t.melee_power_scale) * combo_mult;
+
+        let (origin, dir) = {
+            let e = self.entities.get(&attacker).unwrap();
+            (movement::eye_position(e), movement::view_dir(e.yaw, e.pitch))
+        };
+        let team = self.team_of(attacker).unwrap_or(Team::None);
+        // The Spin finisher sweeps wider and hits harder.
+        let is_finisher = step >= 2;
+        let arc = if is_finisher { t.melee_arc_rad * 1.8 } else { t.melee_arc_rad };
+        let kind = match step {
+            0 => MeleeKind::Slash,
+            1 => MeleeKind::Thrust,
+            _ => MeleeKind::Spin,
+        };
+
+        let targets = self.cone_targets(origin, dir, t.melee_range, arc, Faction::Enemies, attacker, team);
+        let element = ElementId::new("physical");
+        let mut victim = None;
+        let mut total = 0.0;
+        for vid in &targets {
+            self.spell_damage(attacker, *vid, damage, &element, events);
+            let kb = t.melee_knockback * if is_finisher { 1.6 } else { 1.0 };
+            self.apply_melee_knockback(*vid, origin, kb, events);
+            victim.get_or_insert(*vid);
+            total += damage;
+        }
+
+        // Pulse the swing flag for one tick (read by the client for the FP weapon arc).
+        if let Some(e) = self.entities.get_mut(&attacker) {
+            e.flags.set(EntityFlags::MELEEING, true);
+        }
+        events.push(GameEvent::Melee { attacker, victim, origin, dir, kind, damage: total });
+        // The wide finisher gives the swinger a satisfying jolt of screen shake.
+        if is_finisher {
+            events.push(GameEvent::Shake { center: origin, trauma: 0.22 });
+        }
+
+        // Offensive procs: a connecting swing fires OnMelee + OnHit (e.g. The Hungering
+        // Edge's Rend, an "of Storms" chain bolt). Lifesteal returns a slice as health.
+        if let Some(v) = victim {
+            let impact = self.pos_of(v).unwrap_or(origin);
+            self.fire_item_event(attacker, crate::item_procs::ProcEvent::Melee, Some(v), impact, total, events);
+            self.fire_item_event(attacker, crate::item_procs::ProcEvent::Hit, Some(v), impact, total, events);
+            if let Some(d) = self.combined_mods(attacker).and_then(|m| self.rpg.get(&attacker).map(|r| r.derived(&m))) {
+                if d.lifesteal > 0.0 {
+                    self.heal_entity(attacker, total * d.lifesteal);
+                }
+            }
+        }
+
+        let cd = magic::secs_to_ticks(t.melee_swing_s).max(1);
+        self.move_cooldowns.entry(attacker).or_default().insert(key, now + cd);
+    }
+
+    /// Shove a melee-struck foe outward from the attacker (mostly horizontal, a touch
+    /// of lift) and report it as feedback.
+    fn apply_melee_knockback(&mut self, victim: EntityId, from: Vec3, speed: f32, events: &mut Vec<GameEvent>) {
+        if let Some(e) = self.entities.get_mut(&victim) {
+            let to = e.pos - from;
+            let horiz = Vec3::new(to.x, 0.0, to.z).normalize_or_zero();
+            let impulse = horiz * speed + Vec3::Y * speed * 0.3;
+            e.vel += impulse;
+            events.push(GameEvent::Knockback { entity: victim, impulse });
         }
     }
 
@@ -912,6 +1125,14 @@ impl World {
             let e = self.entities.get(&id).unwrap();
             (movement::eye_position(e), movement::view_dir(e.yaw, e.pitch))
         };
+        // The cast deepens the caster's attunement to this school (and, for the dark
+        // schools, courts a little corruption). Intensity scales with the spell's cost.
+        if let Some(owner) = self.entities.get(&id).map(|e| e.owner.clone()) {
+            let element = spell.element.as_str().to_string();
+            let intensity = (spell.mana_cost.max(1.0) / 10.0).min(5.0);
+            self.living.on_cast(&owner, &element, intensity);
+        }
+
         let mut produced = magic::cast(self, id, &spell, origin, dir, now);
         let hit = produced
             .iter()
@@ -1088,6 +1309,63 @@ impl World {
         }
     }
 
+    /// Turn the living world forward one tick and surface its news (season turns,
+    /// festivals, ecology blooms/crashes/mutations) as AOI world-chat lines.
+    fn advance_living(&mut self, now: Tick, events: &mut Vec<GameEvent>) {
+        let pulse = self.living.advance(now as u64);
+        for line in pulse.announcements {
+            events.push(GameEvent::Chat { from: "the World".to_string(), text: line });
+        }
+    }
+
+    /// Realise the Chronicle's queued world-imprints in the actual sim: raise rising
+    /// named foes, drop relic caches where great foes fell, and herald haunts/hallows.
+    /// Drains the living world's pending queue each tick.
+    fn realise_world_imprints(&mut self, now: Tick, events: &mut Vec<GameEvent>) {
+        for m in self.living.take_pending() {
+            match m {
+                arena_mythos::Manifestation::NamedFoeRises { base, power_mult } => {
+                    // Raise the base creature as a fearsome, long-lived foe.
+                    let mob = MobId::new(base.trim_end_matches(".scion").to_string());
+                    let pos = Vec3::new(0.0, 2.0, 0.0);
+                    if let Some(eid) = self.spawn_summon(0, Team::None, &mob, pos, now + 7680) {
+                        if let Some(e) = self.entities.get_mut(&eid) {
+                            e.health = ((e.health as f32) * power_mult).round() as i16;
+                        }
+                        events.push(GameEvent::Chat {
+                            from: "an Omen".to_string(),
+                            text: format!("Something long-buried rises again: {base}."),
+                        });
+                    }
+                }
+                arena_mythos::Manifestation::RelicSite { place, rarity_tier } => {
+                    // A relic cache glimmers where the legend fell.
+                    let payload = LootPayload { items: Vec::new(), xp: (rarity_tier as u64) * 150, ability: None };
+                    self.spawn_loot(place, Team::None, payload);
+                    events.push(GameEvent::Chat {
+                        from: "the World".to_string(),
+                        text: "A relic glimmers where a great foe fell.".to_string(),
+                    });
+                }
+                arena_mythos::Manifestation::HauntedGround { place } => {
+                    // The ground goes wrong: raise a restless wraith if content has one.
+                    let _ = self.spawn_summon(0, Team::None, &MobId::new("mob.void_wraith"), place + Vec3::Y * 2.0, now + 7680);
+                    events.push(GameEvent::Chat {
+                        from: "the World".to_string(),
+                        text: "The ground here has gone wrong. The dead do not rest.".to_string(),
+                    });
+                }
+                arena_mythos::Manifestation::HallowedGround { .. } => {
+                    events.push(GameEvent::Chat {
+                        from: "the World".to_string(),
+                        text: "This ground is hallowed by a great deed.".to_string(),
+                    });
+                }
+                arena_mythos::Manifestation::Constellation { .. } => { /* already hung in the sky */ }
+            }
+        }
+    }
+
     fn process_deaths(&mut self, now: Tick, events: &mut Vec<GameEvent>, deaths: &mut Vec<(EntityId, EntityId)>) {
         let ids: Vec<EntityId> = self
             .entities
@@ -1121,10 +1399,62 @@ impl World {
                 victim: id,
                 killer,
                 weapon: 0,
-                victim_node,
-                killer_node,
+                victim_node: victim_node.clone(),
+                killer_node: killer_node.clone(),
             });
             deaths.push((killer, id));
+
+            // Kill procs: the killer's gear celebrates (Frenzy on kill, Devour stacks,
+            // a kill-nova...), and on-kill sustain refunds health/mana. Credit the kill
+            // to the killer's equipped weapon so "growing" items (The Hungering Edge)
+            // remember it. The victim's position is the natural origin.
+            if killer != id {
+                let kpos = self.entities.get(&id).map(|e| e.pos).unwrap_or(Vec3::ZERO);
+                self.fire_item_event(killer, crate::item_procs::ProcEvent::Kill, Some(id), kpos, 0.0, events);
+                if let Some(d) = self.combined_mods(killer).and_then(|m| self.rpg.get(&killer).map(|r| r.derived(&m))) {
+                    if d.health_on_kill > 0.0 {
+                        self.heal_entity(killer, d.health_on_kill);
+                    }
+                    if d.mana_on_kill > 0.0 {
+                        if let Some(rpg) = self.rpg.get_mut(&killer) {
+                            rpg.mana = (rpg.mana + d.mana_on_kill).min(rpg.max_mana);
+                        }
+                    }
+                }
+                // Credit the kill to the killer's equipped melee weapon, if any.
+                if let Some(inv) = self.inventory.get_mut(&killer) {
+                    let wid = inv
+                        .equipped_instances
+                        .iter()
+                        .find(|(s, _)| matches!(s, arena_content::item::EquipSlot::Weapon | arena_content::item::EquipSlot::Staff))
+                        .map(|(_, id)| *id);
+                    if let Some(wid) = wid {
+                        inv.credit_kill(wid);
+                    }
+                }
+            }
+
+            // Feed the slaying to the living Chronicle. A mob is "a wild beast"; a
+            // player is named by their node id and carries their accrued renown (so
+            // felling a champion is how you become a legend yourself). Deeds may mint a
+            // Legend, hang a constellation, and queue a world-imprint.
+            {
+                let pos = self.entities.get(&id).map(|e| e.pos).unwrap_or(Vec3::ZERO);
+                let (victim_name, magnitude) = if let Some(mob) = self.mobs.get(&id) {
+                    ("a wild beast".to_string(), (mob.xp_reward as f32 / 10.0).max(1.0))
+                } else {
+                    let lvl = self.rpg.get(&id).map(|r| r.level).unwrap_or(1);
+                    (victim_node.clone(), (lvl as f32) * 2.0)
+                };
+                let killer_name = if killer_node.is_empty() { "a beast".to_string() } else { killer_node.clone() };
+                let born = self.living.on_slay(&killer_node, &killer_name, &victim_name, pos, now as u64, magnitude);
+                for legend in born {
+                    events.push(GameEvent::Chat {
+                        from: "the Chronicle".to_string(),
+                        text: format!("A legend is born — {}. {}", legend.name, legend.saga),
+                    });
+                }
+            }
 
             if let Some(mob) = self.mobs.get(&id).cloned() {
                 // A summoned/AI mob: award XP to its killer and remove it.
@@ -1322,7 +1652,11 @@ impl World {
     }
 
     /// The full magnitude multiplier for a spell cast by `caster`: its [`Scaling`]
-    /// against the caster's attributes, times spell power.
+    /// against the caster's attributes, times spell power, times the **living world**
+    /// (season + aetherweather + leyline charge + risen constellations) and the caster's
+    /// personal **attunement** to the school. This is where the world you have shaped —
+    /// drained these leylines, fought under this sky, hung these stars, mastered this
+    /// element — measurably changes your magic.
     pub fn spell_damage_mult(&self, caster: EntityId, spell: &SpellDef) -> f32 {
         let Some(mods) = self.combined_mods(caster) else { return 1.0 };
         let Some(rpg) = self.rpg.get(&caster) else { return 1.0 };
@@ -1332,7 +1666,13 @@ impl World {
             + s.focus * d.focus * 0.01
             + s.agility * d.agility * 0.01
             + s.level * (rpg.level as f32) * 0.02;
-        d.spell_power * (1.0 + contrib)
+        let base = d.spell_power * (1.0 + contrib);
+
+        // Fold in the living world + the caster's attunement.
+        let element = spell.element.as_str();
+        let pos = self.pos_of(caster).unwrap_or(Vec3::ZERO);
+        let owner = self.entities.get(&caster).map(|e| e.owner.as_str()).unwrap_or("");
+        base * self.living.spell_power(element, pos, owner)
     }
 
     /// Faction-filtered ray targets along the eye ray, up to `max_hits`, stopping at
@@ -1443,10 +1783,11 @@ impl World {
         dmg = self.absorb_shield(victim, dmg);
 
         let point = self.entities.get(&victim).map(|e| e.pos).unwrap_or(Vec3::ZERO);
+        let mut real = 0.0;
         if let Some(e) = self.entities.get_mut(&victim) {
             let before = e.health;
             combat::apply_armor_damage(dmg, &mut e.health, &mut e.armor);
-            let real = (before - e.health).max(0) as f32;
+            real = (before - e.health).max(0) as f32;
             events.push(GameEvent::Hit {
                 attacker,
                 victim,
@@ -1456,6 +1797,25 @@ impl World {
             });
         }
         self.last_attacker.insert(victim, attacker);
+
+        // Thorns: reflect a fraction of the damage taken back at the attacker (no proc
+        // recursion — this is a flat reflect, not a re-entry into spell_damage's procs).
+        if real > 0.0 && attacker != victim && self.proc_depth == 0 {
+            if let Some(d) = self.combined_mods(victim).and_then(|m| self.rpg.get(&victim).map(|r| r.derived(&m))) {
+                if d.thorns > 0.0 {
+                    let reflect = real * d.thorns;
+                    if let Some(a) = self.entities.get_mut(&attacker) {
+                        let mut hp = a.health;
+                        let mut armor = a.armor;
+                        combat::apply_armor_damage(reflect, &mut hp, &mut armor);
+                        a.health = hp;
+                        a.armor = armor;
+                    }
+                }
+            }
+            // The victim's defensive procs (frost nova when struck, low-health ward...).
+            self.fire_item_event(victim, crate::item_procs::ProcEvent::TookDamage, Some(attacker), point, real, events);
+        }
     }
 
     pub fn heal_entity(&mut self, id: EntityId, amount: f32) {
@@ -1531,7 +1891,14 @@ impl World {
         }
     }
 
-    pub fn apply_impulse(&mut self, victim: EntityId, ctx: &CastContext, force: f32, vertical_bias: f32) {
+    pub fn apply_impulse(
+        &mut self,
+        victim: EntityId,
+        ctx: &CastContext,
+        force: f32,
+        vertical_bias: f32,
+        events: &mut Vec<GameEvent>,
+    ) {
         let caster_pos = self.pos_of(ctx.caster).unwrap_or(ctx.origin);
         if let Some(e) = self.entities.get_mut(&victim) {
             // Positive force pushes along the cast direction; negative pulls toward
@@ -1543,9 +1910,42 @@ impl World {
                 Vec3::new(to.x, 0.0, to.z).normalize_or_zero()
             };
             let mag = force.abs();
-            e.vel += horiz * mag;
-            e.vel.y += mag * vertical_bias;
+            let impulse = horiz * mag + Vec3::Y * (mag * vertical_bias);
+            e.vel += impulse;
+            // Feedback: every shove the player feels is reported so the client can
+            // lurch the camera (local) or stagger-lean the body (remote).
+            events.push(GameEvent::Knockback { entity: victim, impulse });
         }
+    }
+
+    /// Radial gravity-style force on `victim` relative to `center`. Positive
+    /// `strength` pulls the victim toward the centre (a gravity well); negative
+    /// pushes them away (an explosive shove). `vertical_bias` always lifts (its
+    /// magnitude scales with `|strength|`), so a positive bias throws foes up whether
+    /// the pull is inward or outward, while a small negative bias on a well keeps
+    /// them pinned to the floor. Emits a [`GameEvent::Knockback`] for client feel.
+    pub fn apply_vortex(
+        &mut self,
+        victim: EntityId,
+        center: Vec3,
+        strength: f32,
+        vertical_bias: f32,
+        events: &mut Vec<GameEvent>,
+    ) {
+        if let Some(e) = self.entities.get_mut(&victim) {
+            let to = center - e.pos;
+            let dir = Vec3::new(to.x, 0.0, to.z).normalize_or_zero();
+            let vertical = strength.abs() * vertical_bias;
+            let impulse = dir * strength + Vec3::Y * vertical;
+            e.vel += impulse;
+            events.push(GameEvent::Knockback { entity: victim, impulse });
+        }
+    }
+
+    /// Whether a status id is a buff (vs a debuff) — drives the client's buff/debuff
+    /// feedback tint. Unknown ids are treated as harmful (conservative).
+    pub fn status_beneficial(&self, status: &StatusId) -> bool {
+        self.content.status(status).map(|d| d.beneficial).unwrap_or(false)
     }
 
     pub fn teleport_entity(&mut self, id: EntityId, dir: Vec3, max_distance: f32) {
@@ -1711,7 +2111,8 @@ impl World {
         })
     }
 
-    /// Equipped-item mods combined with unlocked-tech `StatMult` mods.
+    /// Equipped-item mods combined with unlocked-tech `StatMult` mods and any active
+    /// temporary proc buffs (Berserk surges, Bastion, etc.).
     fn combined_mods(&self, id: EntityId) -> Option<StatMods> {
         let inv = self.inventory.get(&id)?;
         let mut mods = inv.aggregate_mods(&self.content);
@@ -1726,7 +2127,145 @@ impl World {
                 }
             }
         }
+        // Live proc buffs (expiry is swept in `tick`).
+        if let Some(buffs) = self.temp_buffs.get(&id) {
+            for (m, expire) in buffs {
+                if self.tick < *expire {
+                    mods = mods.combine(m);
+                }
+            }
+        }
         Some(mods)
+    }
+
+    // ================================================================================
+    // Item proc dispatch — the seam that makes "every item does something" real.
+    // ================================================================================
+
+    /// Raise an item-proc event for `wearer` and apply whatever their gear fires. The
+    /// caller passes the natural origin/target/damage of the moment. Deterministic in
+    /// the tick. Guards against recursion so a damage proc cannot loop.
+    pub fn fire_item_event(
+        &mut self,
+        wearer: EntityId,
+        event: crate::item_procs::ProcEvent,
+        other: Option<EntityId>,
+        origin: Vec3,
+        damage: f32,
+        events: &mut Vec<GameEvent>,
+    ) {
+        if self.proc_depth > 0 {
+            return; // don't let nova/chain damage retrigger on-hit procs
+        }
+        let Some(inv) = self.inventory.get(&wearer) else { return };
+        let triggers = inv.equipped_triggers(&self.content);
+        if triggers.is_empty() {
+            return;
+        }
+        let health_frac = self
+            .entities
+            .get(&wearer)
+            .map(|e| e.health.max(0) as f32)
+            .zip(self.combined_mods(wearer).and_then(|m| self.rpg.get(&wearer).map(|r| r.derived(&m).max_health)))
+            .map(|(hp, max)| if max > 0.0 { hp / max } else { 1.0 })
+            .unwrap_or(1.0);
+
+        let ctx = crate::item_procs::ProcContext {
+            event,
+            wearer: wearer as u64,
+            other: other.map(|o| o as u64),
+            origin,
+            damage,
+            health_frac,
+            dt: arena_protocol::TICK_DT,
+            seed: self.tick.wrapping_mul(0x9E37_79B9).wrapping_add(wearer as u64),
+        };
+        let rt = self.proc_rt.entry(wearer).or_default();
+        let outcomes = crate::item_procs::evaluate(&triggers, &ctx, rt);
+        if outcomes.is_empty() {
+            return;
+        }
+        self.proc_depth += 1;
+        for o in outcomes {
+            self.apply_proc_outcome(wearer, o, events);
+        }
+        self.proc_depth -= 1;
+    }
+
+    /// Apply one resolved proc outcome using the existing sim primitives.
+    fn apply_proc_outcome(
+        &mut self,
+        wearer: EntityId,
+        outcome: crate::item_procs::ProcOutcome,
+        events: &mut Vec<GameEvent>,
+    ) {
+        use crate::item_procs::ProcOutcome as O;
+        let now = self.tick;
+        let team = self.team_of(wearer).unwrap_or(Team::None);
+        match outcome {
+            O::Nova { at, element, radius, damage, .. } => {
+                let r = radius * self.combined_mods(wearer).and_then(|m| self.rpg.get(&wearer).map(|x| x.derived(&m).aoe_mult)).unwrap_or(1.0);
+                events.push(GameEvent::Explosion { center: at, radius: r });
+                let element = ElementId::new(element.as_str());
+                for (victim, _d) in self.sphere_targets(at, r, Faction::Enemies, wearer, team) {
+                    self.spell_damage(wearer, victim, damage, &element, events);
+                }
+            }
+            O::ChainBolt { from, element, jumps, damage, .. } => {
+                let element = ElementId::new(element.as_str());
+                // Hit the nearest `jumps` enemies in a generous radius, fading per jump.
+                let mut targets = self.sphere_targets(from, 14.0, Faction::Enemies, wearer, team);
+                targets.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                for (i, (victim, _d)) in targets.into_iter().take(jumps as usize).enumerate() {
+                    let falloff = 0.85f32.powi(i as i32);
+                    self.spell_damage(wearer, victim, damage * falloff, &element, events);
+                }
+            }
+            O::ApplyStatus { target, status, duration_s, stacks } => {
+                self.apply_status_to(target as EntityId, &status, duration_s, stacks, now, wearer);
+            }
+            O::Heal { target, amount } => self.heal_entity(target as EntityId, amount),
+            O::Shield { target, amount, duration_s } => {
+                let expire = now + magic::secs_to_ticks(duration_s).max(1);
+                self.add_shield(target as EntityId, amount, expire);
+            }
+            O::TempStats { target, mods, duration_s } => {
+                let expire = now + magic::secs_to_ticks(duration_s).max(1);
+                self.temp_buffs.entry(target as EntityId).or_default().push((*mods, expire));
+            }
+            // CastSpell and Summon route into the cast/summon pipelines; wired where the
+            // proc fires from a full CastContext. Left as explicit no-ops here so the
+            // engine never silently double-casts during the contained dispatch path.
+            O::CastSpell { .. } | O::Summon { .. } => {}
+        }
+    }
+
+    /// The per-tick proc heartbeat: advance ICD timers, sweep expired temp buffs, and
+    /// raise a `Tick` event so `Aura`/`Interval` procs (trails, pulses, on-equip wards)
+    /// fire on schedule.
+    fn tick_item_procs(&mut self, player_ids: &[EntityId], events: &mut Vec<GameEvent>) {
+        let dt = arena_protocol::TICK_DT;
+        for id in player_ids {
+            if let Some(rt) = self.proc_rt.get_mut(id) {
+                rt.tick(dt);
+            }
+        }
+        self.sweep_temp_buffs();
+        for id in player_ids {
+            if self.entities.get(id).map(|e| e.is_alive()).unwrap_or(false) {
+                let origin = self.pos_of(*id).unwrap_or(Vec3::ZERO);
+                self.fire_item_event(*id, crate::item_procs::ProcEvent::Tick, None, origin, 0.0, events);
+            }
+        }
+    }
+
+    /// Sweep expired temporary proc buffs. Called each tick.
+    fn sweep_temp_buffs(&mut self) {
+        let now = self.tick;
+        for buffs in self.temp_buffs.values_mut() {
+            buffs.retain(|(_, expire)| now < *expire);
+        }
+        self.temp_buffs.retain(|_, v| !v.is_empty());
     }
 
     fn selected_ability(&self, id: EntityId, slot: u8) -> Option<AbilityId> {
@@ -2370,5 +2909,120 @@ mod tests {
         // Re-seeding the same owner replaces in place (same id).
         let id2 = w.seed_player(owner.clone(), &st);
         assert_eq!(id, id2, "re-seeding an owner reuses the entity id");
+    }
+
+    // ----- combat upgrade: melee, gravity (vortex), and content presence -----
+
+    #[test]
+    fn melee_strike_damages_and_knocks_back_a_facing_foe() {
+        let mut w = world();
+        // Caster at origin facing -Z (yaw 0); victim just ahead, inside melee reach.
+        let caster = place(&mut w, "a", Team::Red, Vec3::new(0.0, STAND_HALF_HEIGHT, 0.0), 0.0);
+        let victim = place(&mut w, "b", Team::Blue, Vec3::new(0.0, STAND_HALF_HEIGHT, -2.0), 0.0);
+        let hp0 = w.entities[&victim].health;
+
+        let mut b = Buttons::default();
+        b.set(Buttons::MELEE, true);
+        w.set_input(caster, InputFrame { seq: 1, client_tick: 0, buttons: b, yaw: 0.0, pitch: 0.0, weapon_slot: 0 });
+        let report = w.tick();
+
+        assert!(w.entities[&victim].health < hp0, "melee should damage a foe in the arc");
+        assert!(
+            report.events.iter().any(|e| matches!(e, GameEvent::Melee { attacker, .. } if *attacker == caster)),
+            "a Melee feedback event should be emitted"
+        );
+        assert!(
+            report.events.iter().any(|e| matches!(e, GameEvent::Knockback { entity, .. } if *entity == victim)),
+            "a struck foe should be knocked back (force feedback)"
+        );
+        // The shove is mostly away from the attacker (the victim sits at -Z).
+        assert!(w.entities[&victim].vel.z < 0.0, "knockback pushes the foe away (-Z)");
+    }
+
+    #[test]
+    fn melee_misses_a_foe_outside_the_arc() {
+        let mut w = world();
+        let caster = place(&mut w, "a", Team::Red, Vec3::new(0.0, STAND_HALF_HEIGHT, 0.0), 0.0);
+        // Victim directly *behind* the caster: outside the forward arc.
+        let victim = place(&mut w, "b", Team::Blue, Vec3::new(0.0, STAND_HALF_HEIGHT, 2.0), 0.0);
+        let hp0 = w.entities[&victim].health;
+        let mut events = Vec::new();
+        w.melee_attack(caster, w.current_tick() + 1, &mut events);
+        assert_eq!(w.entities[&victim].health, hp0, "a foe behind the swing is unharmed");
+    }
+
+    #[test]
+    fn melee_combo_escalates_damage() {
+        let mut w = world();
+        let caster = place(&mut w, "a", Team::Red, Vec3::new(0.0, STAND_HALF_HEIGHT, 0.0), 0.0);
+        let victim = place(&mut w, "b", Team::Blue, Vec3::new(0.0, STAND_HALF_HEIGHT, -2.0), 0.0);
+        // Make the victim a punching bag so it survives the chained swings.
+        w.entities.get_mut(&victim).unwrap().health = 10_000;
+
+        let first_dmg = |events: &[GameEvent]| -> f32 {
+            events
+                .iter()
+                .find_map(|e| match e {
+                    GameEvent::Hit { victim: v, damage, .. } if *v == victim => Some(*damage),
+                    _ => None,
+                })
+                .expect("a connecting swing emits a Hit")
+        };
+
+        let swing = crate::magic::secs_to_ticks(0.45).max(1);
+
+        let mut e0 = Vec::new();
+        w.melee_attack(caster, 10, &mut e0);
+        let d0 = first_dmg(&e0);
+
+        // A second swing after the recovery but within the combo window: harder (step 1).
+        let mut e1 = Vec::new();
+        w.melee_attack(caster, 10 + swing + 1, &mut e1);
+        let d1 = first_dmg(&e1);
+
+        assert!(d1 > d0, "the chained combo swing should hit harder ({d1} vs {d0})");
+    }
+
+    #[test]
+    fn gravity_vortex_pulls_a_foe_inward() {
+        let mut w = world();
+        let victim = place(&mut w, "b", Team::Blue, Vec3::new(5.0, STAND_HALF_HEIGHT, 0.0), 0.0);
+        let mut events = Vec::new();
+        // Positive strength: pull toward the centre (the origin) — a gravity well.
+        w.apply_vortex(victim, Vec3::new(0.0, STAND_HALF_HEIGHT, 0.0), 14.0, 0.0, &mut events);
+        assert!(w.entities[&victim].vel.x < 0.0, "a gravity well pulls a +X foe toward the centre (-X)");
+        assert!(
+            events.iter().any(|e| matches!(e, GameEvent::Knockback { entity, .. } if *entity == victim)),
+            "a vortex pull reports a Knockback for feedback"
+        );
+    }
+
+    #[test]
+    fn repulsion_vortex_pushes_a_foe_outward_and_up() {
+        let mut w = world();
+        let victim = place(&mut w, "b", Team::Blue, Vec3::new(5.0, STAND_HALF_HEIGHT, 0.0), 0.0);
+        let mut events = Vec::new();
+        // Negative strength with positive vertical bias: shove outward (+X) and up.
+        w.apply_vortex(victim, Vec3::new(0.0, STAND_HALF_HEIGHT, 0.0), -22.0, 0.6, &mut events);
+        assert!(w.entities[&victim].vel.x > 0.0, "a repulsion shoves a +X foe further out (+X)");
+        assert!(w.entities[&victim].vel.y > 0.0, "a positive vertical bias always lifts");
+    }
+
+    #[test]
+    fn default_pack_carries_the_new_combat_content() {
+        let w = world();
+        for spell in ["spell.gravity_well", "spell.singularity", "spell.repulsion_nova"] {
+            assert!(
+                w.content.spell(&SpellId::new(spell)).is_some(),
+                "default pack should define {spell}"
+            );
+        }
+        let pack = w.content.pack();
+        for mode in ["movement.fly", "movement.momentum_boost"] {
+            assert!(
+                pack.movement_modes.iter().any(|m| m.id.0 == mode),
+                "default pack should define {mode}"
+            );
+        }
     }
 }

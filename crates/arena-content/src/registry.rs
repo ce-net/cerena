@@ -10,12 +10,16 @@ use std::collections::HashMap;
 use crate::{
     ContentError,
     ability::AbilityDef,
+    affix::AffixDef,
+    enchant::{EnchantDef, RunewordDef},
     gamemode::GameModeDef,
+    gem::GemDef,
     ids::{
-        AbilityId, GameModeId, ItemId, LootTableId, MaterialId, MobId, ShaderId, SpawnRuleId,
-        SpellId, StatusId, TriggerId,
+        AbilityId, AffixId, EnchantId, GameModeId, GemId, ItemId, LootTableId, MaterialId, MobId,
+        RunewordId, SetId, ShaderId, SpawnRuleId, SpellId, StatusId, TriggerId,
     },
-    item::ItemDef,
+    item::{EquipSlot, ItemDef},
+    itemset::SetDef,
     loot::LootTableDef,
     material::{MaterialDef, ShaderDef},
     mob::MobDef,
@@ -44,6 +48,11 @@ pub struct ContentRegistry {
     loot_tables: HashMap<LootTableId, usize>,
     spawn_rules: HashMap<SpawnRuleId, usize>,
     triggers: HashMap<TriggerId, usize>,
+    affixes: HashMap<AffixId, usize>,
+    gems: HashMap<GemId, usize>,
+    item_sets: HashMap<SetId, usize>,
+    enchants: HashMap<EnchantId, usize>,
+    runewords: HashMap<RunewordId, usize>,
     /// A pack staged for the next tick-boundary swap, with its target epoch.
     pending: Option<(u64, ContentPack)>,
 }
@@ -68,6 +77,11 @@ impl ContentRegistry {
             loot_tables: HashMap::new(),
             spawn_rules: HashMap::new(),
             triggers: HashMap::new(),
+            affixes: HashMap::new(),
+            gems: HashMap::new(),
+            item_sets: HashMap::new(),
+            enchants: HashMap::new(),
+            runewords: HashMap::new(),
             pending: None,
         };
         r.reindex(pack);
@@ -92,6 +106,11 @@ impl ContentRegistry {
         self.loot_tables = pack.loot_tables.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
         self.spawn_rules = pack.spawn_rules.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
         self.triggers = pack.triggers.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
+        self.affixes = pack.affixes.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
+        self.gems = pack.gems.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
+        self.item_sets = pack.item_sets.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
+        self.enchants = pack.enchants.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
+        self.runewords = pack.runewords.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
         self.active_hash = pack.hash();
         self.pack = pack;
     }
@@ -163,6 +182,43 @@ impl ContentRegistry {
     }
     pub fn trigger(&self, id: &TriggerId) -> Option<&TriggerDef> {
         self.triggers.get(id).map(|&i| &self.pack.triggers[i])
+    }
+    pub fn affix(&self, id: &AffixId) -> Option<&AffixDef> {
+        self.affixes.get(id).map(|&i| &self.pack.affixes[i])
+    }
+    pub fn gem(&self, id: &GemId) -> Option<&GemDef> {
+        self.gems.get(id).map(|&i| &self.pack.gems[i])
+    }
+    pub fn item_set(&self, id: &SetId) -> Option<&SetDef> {
+        self.item_sets.get(id).map(|&i| &self.pack.item_sets[i])
+    }
+    pub fn enchant(&self, id: &EnchantId) -> Option<&EnchantDef> {
+        self.enchants.get(id).map(|&i| &self.pack.enchants[i])
+    }
+    pub fn runeword(&self, id: &RunewordId) -> Option<&RunewordDef> {
+        self.runewords.get(id).map(|&i| &self.pack.runewords[i])
+    }
+    pub fn forge_config(&self) -> &crate::forge::ForgeConfig {
+        &self.pack.forge
+    }
+
+    /// The affixes eligible to roll on an item in `slot` carrying `tags` at item level
+    /// `ilvl`. The forge draws weighted from this filtered pool. Returned in pack order
+    /// for deterministic rolls across nodes.
+    pub fn affix_pool(&self, slot: EquipSlot, tags: &[String], ilvl: u32) -> Vec<&AffixDef> {
+        self.pack
+            .affixes
+            .iter()
+            .filter(|a| a.eligible(slot, tags, ilvl))
+            .collect()
+    }
+
+    /// The first runeword that the ordered `socketed` rune symbols activate in `slot`.
+    pub fn match_runeword(&self, slot: EquipSlot, socketed: &[String]) -> Option<&RunewordDef> {
+        self.pack
+            .runewords
+            .iter()
+            .find(|rw| rw.matches(slot, socketed))
     }
 
     /// The global balance numbers for this epoch. The sim should read movement,

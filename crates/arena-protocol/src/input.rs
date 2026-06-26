@@ -29,6 +29,13 @@ impl Buttons {
     pub const RELOAD: u16 = 1 << 9;
     pub const USE: u16 = 1 << 10;
     pub const MELEE: u16 = 1 << 11;
+    /// Activate the selected discrete movement ability (dash / blink / grapple /
+    /// momentum-boost). Kept distinct from [`Self::MELEE`] so a melee weapon strike
+    /// and a parkour burst are separate intents.
+    pub const MOVE_ABILITY: u16 = 1 << 12;
+    /// Hold to fly when a flight movement mode is equipped (full 3D control; jump =
+    /// ascend, crouch = descend).
+    pub const FLY: u16 = 1 << 13;
 
     pub fn has(self, flag: u16) -> bool {
         self.0 & flag != 0

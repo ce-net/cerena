@@ -31,6 +31,8 @@
 //! - [`map`]       — static collision geometry + spawn points.
 //! - [`collision`] — capsule-vs-AABB sliding, raycasts, ray-vs-player tests.
 //! - [`movement`]  — base locomotion + the parkour movement-mode kit.
+//! - [`physics`]   — reusable broadphase, body/projectile integration, steering,
+//!   and framerate-independent smoothing (shared by mobs, spells, AoI, camera).
 //! - [`combat`]    — shared damage/faction rules + deterministic hashing.
 //! - [`magic`]     — the [`arena_content::spell::EffectOp`] interpreter (the spell VM).
 //! - [`rpg`]       — attributes, level/XP, mana/stamina, tech-derived stats.
@@ -41,15 +43,23 @@
 
 pub mod collision;
 pub mod combat;
+pub mod forge;
 pub mod inventory;
+pub mod item_instance;
+pub mod item_procs;
+pub mod living;
 pub mod magic;
 pub mod map;
 pub mod movement;
+pub mod physics;
 pub mod rpg;
 pub mod world;
 
 // The types other crates reach for most often, surfaced at the crate root.
 pub use inventory::Inventory;
+pub use item_instance::{InstanceId, ItemInstance};
+pub use item_procs::{ProcContext, ProcEvent, ProcOutcome, ProcRuntime};
+pub use living::LivingWorld;
 pub use magic::CastContext;
 pub use map::MapDef;
 pub use rpg::{Attributes, Derived, RpgState};

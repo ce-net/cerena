@@ -1,0 +1,16 @@
+[package]
+name = "arena-assets"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bakes content + procgen + rigs into GPU-ready assets (skinned meshes, textures, materials, shaders, rigs) indexed by handle, with a hot-reloadable AssetServer. wasm-clean, no wgpu — makes the renderer a thin uploader."
+
+[dependencies]
+arena-protocol = { path = "../arena-protocol" }
+arena-content = { path = "../arena-content" }
+arena-procgen = { path = "../arena-procgen" }
+arena-anim = { path = "../arena-anim" }
+glam.workspace = true
+serde.workspace = true

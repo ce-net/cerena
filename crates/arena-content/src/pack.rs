@@ -10,8 +10,13 @@ use sha2::{Digest, Sha256};
 use crate::{
     ContentError,
     ability::AbilityDef,
+    affix::AffixDef,
+    enchant::{EnchantDef, RunewordDef},
+    forge::ForgeConfig,
     gamemode::GameModeDef,
+    gem::GemDef,
     item::ItemDef,
+    itemset::SetDef,
     loot::LootTableDef,
     material::{MaterialDef, ShaderDef},
     mission::MissionDef,
@@ -55,6 +60,26 @@ pub struct ContentPack {
     pub spawn_rules: Vec<SpawnRuleDef>,
     /// Data-driven event->action rules: the designer's scripting layer.
     pub triggers: Vec<TriggerDef>,
+
+    // --- the gear / build system (all hot-reloadable like everything else) ---
+    /// Rollable magic properties that drop instances roll from.
+    #[serde(default)]
+    pub affixes: Vec<AffixDef>,
+    /// Socketable gems and runes.
+    #[serde(default)]
+    pub gems: Vec<GemDef>,
+    /// Gear sets and their bonus ladders.
+    #[serde(default)]
+    pub item_sets: Vec<SetDef>,
+    /// Permanent applied enchants.
+    #[serde(default)]
+    pub enchants: Vec<EnchantDef>,
+    /// Runeword recipes.
+    #[serde(default)]
+    pub runewords: Vec<RunewordDef>,
+    /// House rules for the forge (upgrade/reforge/socket/enchant economy).
+    #[serde(default)]
+    pub forge: ForgeConfig,
 }
 
 impl ContentPack {
@@ -242,6 +267,33 @@ impl ContentPack {
                 }
             }
         }
+
+        // Gear: set rosters and runeword sequences must resolve against real content.
+        let gem_symbols: std::collections::HashSet<_> = self
+            .gems
+            .iter()
+            .filter_map(|g| g.rune_symbol.clone())
+            .collect();
+        for s in &self.item_sets {
+            for it in &s.pieces {
+                if !item_ids.contains(it) {
+                    return Err(ContentError::Invalid(format!(
+                        "set {} lists missing item {it}",
+                        s.id
+                    )));
+                }
+            }
+        }
+        for rw in &self.runewords {
+            for sym in &rw.sequence {
+                if !gem_symbols.contains(sym) {
+                    return Err(ContentError::Invalid(format!(
+                        "runeword {} needs missing rune symbol {sym}",
+                        rw.id
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -265,6 +317,12 @@ impl ContentPack {
             loot_tables: vec![],
             spawn_rules: vec![],
             triggers: vec![],
+            affixes: vec![],
+            gems: vec![],
+            item_sets: vec![],
+            enchants: vec![],
+            runewords: vec![],
+            forge: ForgeConfig::default(),
         }
     }
 }

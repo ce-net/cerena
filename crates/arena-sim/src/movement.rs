@@ -60,6 +60,11 @@ pub struct MovementRuntime {
     pub extra_jumps_used: u8,
     /// A ground-slam is descending and will burst on the next landing.
     pub slam_pending: bool,
+    /// Current melee combo step (0 = opening Slash). Advances on each chained swing,
+    /// resets to 0 when the combo window lapses.
+    pub melee_combo: u8,
+    /// Sim tick of the last melee swing, for the combo-window timer.
+    pub melee_last_tick: u32,
 }
 
 /// Tuning knobs the world feeds into [`move_player`], folding in status effects
@@ -77,6 +82,18 @@ pub struct MoveParams {
     pub gravity_mult: f32,
     /// Immobilised (rooted / frozen): no horizontal control, no jump.
     pub rooted: bool,
+    /// Flight is engaged this tick (full 3D control, gravity suppressed). The world
+    /// sets this when a [`MovementKind::Fly`] mode is unlocked and the fly intent is
+    /// held *and* its per-tick upkeep was paid.
+    pub fly: bool,
+    /// Target flight speed (m/s) when `fly` is set.
+    pub fly_speed: f32,
+    /// How quickly flight velocity converges on its target (per second).
+    pub fly_accel: f32,
+    /// Vertical climb/ascend speed (m/s). >0 means cling-and-climb a wall this tick
+    /// (set by the world when a [`MovementKind::Climb`] mode is active against a
+    /// wall); overrides gravity and drives the capsule straight up.
+    pub climb_speed: f32,
 }
 
 impl Default for MoveParams {
@@ -87,6 +104,10 @@ impl Default for MoveParams {
             speed_scale: 1.0,
             gravity_mult: 1.0,
             rooted: false,
+            fly: false,
+            fly_speed: 0.0,
+            fly_accel: 0.0,
+            climb_speed: 0.0,
         }
     }
 }
@@ -137,6 +158,13 @@ pub fn move_player(
 ) -> MoveStatus {
     state.yaw = frame.yaw;
     state.pitch = frame.pitch;
+
+    // --- Flight: full 3D control, gravity suppressed --------------------------
+    // (The MELEEING flag is a one-tick pulse the world's melee path sets *before*
+    // this sweep runs; the base move leaves it untouched so it clears next tick.)
+    if params.fly {
+        return fly_move(state, frame, dt, brushes, params);
+    }
 
     // --- Crouch: resize the capsule, keeping the feet planted -----------------
     let crouching = frame.buttons.has(Buttons::CROUCH);
@@ -191,8 +219,17 @@ pub fn move_player(
         accelerate(&mut vel, wishdir, wishspeed.min(AIR_CONTROL_CAP), AIR_ACCEL, dt);
     }
 
-    // Gravity (scaled for glide/wall-run/levitate).
-    vel.y += GRAVITY * params.gravity_mult * dt;
+    // Wall-climb overrides gravity: stick to the surface and ascend at climb speed,
+    // damping any outward drift so the capsule hugs the wall instead of peeling off.
+    let climbing = params.climb_speed > 0.0;
+    if climbing {
+        vel.y = params.climb_speed;
+        vel.x *= 0.6;
+        vel.z *= 0.6;
+    } else {
+        // Gravity (scaled for glide/wall-run/levitate).
+        vel.y += GRAVITY * params.gravity_mult * dt;
+    }
 
     let MoveResult {
         pos: new_pos,
@@ -208,6 +245,8 @@ pub fn move_player(
     state.flags.set(EntityFlags::AIRBORNE, !grounded);
     state.flags.set(EntityFlags::CROUCHING, crouching);
     state.flags.set(EntityFlags::SPRINTING, sprinting && grounded);
+    state.flags.set(EntityFlags::FLYING, false);
+    state.flags.set(EntityFlags::CLIMBING, climbing);
 
     let wall_normal = if grounded {
         None
@@ -216,6 +255,66 @@ pub fn move_player(
     };
 
     MoveStatus { on_ground: grounded, wall_normal }
+}
+
+/// Flight kinematics: steer the capsule along the full view ray in three
+/// dimensions, with jump/crouch overriding vertical, and smoothly converge velocity
+/// on the target so flight feels weighty rather than instant. Gravity is suppressed
+/// entirely; collision is still resolved so you cannot fly through geometry.
+fn fly_move(
+    state: &mut EntityState,
+    frame: &InputFrame,
+    dt: f32,
+    brushes: &[Aabb],
+    params: &MoveParams,
+) -> MoveStatus {
+    let look = view_dir(frame.yaw, frame.pitch);
+    let (sy, cy) = frame.yaw.sin_cos();
+    let right = Vec3::new(cy, 0.0, sy);
+
+    let mut wish = Vec3::ZERO;
+    if frame.buttons.has(Buttons::FORWARD) {
+        wish += look;
+    }
+    if frame.buttons.has(Buttons::BACK) {
+        wish -= look;
+    }
+    if frame.buttons.has(Buttons::RIGHT) {
+        wish += right;
+    }
+    if frame.buttons.has(Buttons::LEFT) {
+        wish -= right;
+    }
+    // Jump ascends, crouch descends — explicit vertical control on top of the look ray.
+    if frame.buttons.has(Buttons::JUMP) {
+        wish += Vec3::Y;
+    }
+    if frame.buttons.has(Buttons::CROUCH) {
+        wish -= Vec3::Y;
+    }
+
+    let wishdir = if params.rooted { Vec3::ZERO } else { wish.normalize_or_zero() };
+    let speed = (params.fly_speed * params.speed_scale).max(0.0);
+    let target = wishdir * speed;
+    // Critically-damped-ish convergence: lerp toward the target velocity. With no
+    // input the target is zero, so the flyer eases to a hover.
+    let t = (params.fly_accel * dt).clamp(0.0, 1.0);
+    let mut vel = state.vel + (target - state.vel) * t;
+
+    let half_height = half_height_of(state);
+    let MoveResult { pos: new_pos, vel: new_vel, on_ground, .. } =
+        collision::resolve_move(state.pos, vel, dt, half_height, PLAYER_RADIUS, brushes);
+    vel = new_vel;
+    state.pos = new_pos;
+    state.vel = vel;
+
+    state.flags.set(EntityFlags::ON_GROUND, on_ground);
+    state.flags.set(EntityFlags::AIRBORNE, !on_ground);
+    state.flags.set(EntityFlags::FLYING, true);
+    state.flags.set(EntityFlags::CLIMBING, false);
+    state.flags.set(EntityFlags::CROUCHING, false);
+
+    MoveStatus { on_ground, wall_normal: None }
 }
 
 /// Classic ground friction on horizontal velocity (vertical is gravity/jumps).
@@ -329,14 +428,129 @@ pub fn apply_mode(
                 out.used = true;
             }
         }
+        MovementKind::MomentumBoost { boost_mult, min_speed, impulse } => {
+            // Reward flow: only fires when already moving, amplifying the *existing*
+            // horizontal velocity and adding a flat burst along it (or along aim from
+            // a near-stop). Chains beautifully off a slide, wall-run, or grapple.
+            let horiz = Vec3::new(state.vel.x, 0.0, state.vel.z);
+            let speed = horiz.length();
+            if speed >= *min_speed {
+                let dir = if speed > 1e-3 { horiz / speed } else { horizontal(aim_dir) };
+                let new_speed = speed * *boost_mult + *impulse;
+                state.vel.x = dir.x * new_speed;
+                state.vel.z = dir.z * new_speed;
+                // A sliver of lift so a ground boost can carry over a lip.
+                if on_ground {
+                    state.vel.y = state.vel.y.max(2.0);
+                }
+                out.used = true;
+            }
+        }
         // Continuous modes shape MoveParams instead; activating them here is a no-op
         // beyond acknowledging the input so the world can keep charging upkeep.
         MovementKind::WallRun { .. }
         | MovementKind::Glide { .. }
         | MovementKind::Sprint { .. }
-        | MovementKind::Climb { .. } => {
+        | MovementKind::Climb { .. }
+        | MovementKind::Fly { .. } => {
             out.used = true;
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arena_protocol::entity::EntityKind;
+    use arena_protocol::world::Team;
+
+    fn body(pos: Vec3, vel: Vec3, on_ground: bool) -> EntityState {
+        let mut flags = EntityFlags::default();
+        flags.set(EntityFlags::ON_GROUND, on_ground);
+        flags.set(EntityFlags::AIRBORNE, !on_ground);
+        EntityState {
+            id: 1,
+            kind: EntityKind::Player,
+            pos,
+            vel,
+            yaw: 0.0,
+            pitch: 0.0,
+            flags,
+            team: Team::None,
+            health: 100,
+            armor: 0,
+            weapon: 0,
+            owner: String::new(),
+        }
+    }
+
+    fn frame(buttons: u16, yaw: f32, pitch: f32) -> InputFrame {
+        InputFrame {
+            seq: 1,
+            client_tick: 0,
+            buttons: Buttons(buttons),
+            yaw,
+            pitch,
+            weapon_slot: 0,
+        }
+    }
+
+    #[test]
+    fn flight_suppresses_gravity_and_steers_along_view() {
+        // Flying forward at yaw 0 (forward = -Z) over empty space.
+        let mut s = body(Vec3::new(0.0, 50.0, 0.0), Vec3::ZERO, false);
+        let params = MoveParams { fly: true, fly_speed: 16.0, fly_accel: 22.0, ..Default::default() };
+        let f = frame(Buttons::FORWARD, 0.0, 0.0);
+        for _ in 0..30 {
+            move_player(&mut s, &f, 1.0 / 64.0, false, &[], &params);
+        }
+        assert!(s.vel.z < -5.0, "flight should carry the wizard forward (-Z), got {:?}", s.vel);
+        assert!(s.vel.y.abs() < 0.5, "flight must suppress gravity, vel.y={}", s.vel.y);
+        assert!(s.flags.has(EntityFlags::FLYING), "the flying flag should be set");
+    }
+
+    #[test]
+    fn flight_hovers_when_no_input() {
+        let mut s = body(Vec3::new(0.0, 50.0, 0.0), Vec3::new(0.0, -8.0, 0.0), false);
+        let params = MoveParams { fly: true, fly_speed: 16.0, fly_accel: 22.0, ..Default::default() };
+        let f = frame(0, 0.0, 0.0);
+        for _ in 0..60 {
+            move_player(&mut s, &f, 1.0 / 64.0, false, &[], &params);
+        }
+        assert!(s.vel.length() < 1.0, "with no input flight eases to a hover, got {:?}", s.vel);
+    }
+
+    #[test]
+    fn momentum_boost_amplifies_existing_speed() {
+        // Moving at 8 m/s along +X, grounded.
+        let mut s = body(Vec3::ZERO, Vec3::new(8.0, 0.0, 0.0), true);
+        let mut rt = MovementRuntime::default();
+        let kind = MovementKind::MomentumBoost { boost_mult: 1.5, min_speed: 6.0, impulse: 10.0 };
+        let out = apply_mode(&mut s, &kind, Vec3::X, true, &[], &mut rt);
+        assert!(out.used, "boost should fire above min_speed");
+        // 8 * 1.5 + 10 = 22 along +X.
+        assert!((s.vel.x - 22.0).abs() < 0.01, "boosted speed, got {}", s.vel.x);
+    }
+
+    #[test]
+    fn momentum_boost_requires_flow() {
+        // Below min_speed: the boost refuses (rewards keeping momentum, not standing).
+        let mut s = body(Vec3::ZERO, Vec3::new(3.0, 0.0, 0.0), true);
+        let mut rt = MovementRuntime::default();
+        let kind = MovementKind::MomentumBoost { boost_mult: 1.5, min_speed: 6.0, impulse: 10.0 };
+        let out = apply_mode(&mut s, &kind, Vec3::X, true, &[], &mut rt);
+        assert!(!out.used, "boost should not fire from a near-standstill");
+    }
+
+    #[test]
+    fn climb_drives_the_capsule_upward() {
+        let mut s = body(Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO, false);
+        let params = MoveParams { climb_speed: 4.0, ..Default::default() };
+        let f = frame(Buttons::FORWARD, 0.0, 0.0);
+        let before = s.pos.y;
+        move_player(&mut s, &f, 1.0 / 64.0, false, &[], &params);
+        assert!(s.pos.y > before, "climbing should raise the capsule");
+        assert!(s.flags.has(EntityFlags::CLIMBING), "the climbing flag should be set");
+    }
 }

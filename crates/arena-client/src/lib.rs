@@ -36,12 +36,15 @@
 //! - [`hotreload`]  — stage + apply a new content pack: regen assets, recompile
 //!   shaders.
 //! - [`particles`]  — CPU particle system fed by procgen emitters + spell events.
+//! - [`feedback`]   — game-feel layer: trauma camera shake, weapon/impact view kick,
+//!   damage/heal screen flash + directional indicator, all driven by `GameEvent`s.
 //!
 //! This crate is deliberately the *only* place graphics, windowing and the browser
 //! transport live; the simulation, netcode and content crates stay platform-free.
 
 pub mod app;
 pub mod camera;
+pub mod feedback;
 pub mod gpu;
 pub mod hotreload;
 pub mod hud;

@@ -230,6 +230,14 @@ fn event_in_aoi(
         GameEvent::PickupTaken { pickup, by } => touches(pickup) || touches(by),
         // Chat is scoped by the caller (zone/team); always forward what we are given.
         GameEvent::Chat { .. } => true,
+        // Feedback events: relevant when they touch a visible entity or land near one.
+        GameEvent::Melee { attacker, victim, origin, .. } => {
+            touches(attacker) || victim.map(|v| touches(&v)).unwrap_or(false) || near(*origin)
+        }
+        GameEvent::Knockback { entity, .. } => touches(entity),
+        GameEvent::Buff { entity, .. } => touches(entity),
+        GameEvent::Heal { target, .. } => touches(target),
+        GameEvent::Shake { center, .. } => near(*center),
     }
 }
 

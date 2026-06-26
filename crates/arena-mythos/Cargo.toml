@@ -1,0 +1,12 @@
+[package]
+name = "arena-mythos"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The living soul of Cerena: deterministic seasons + three moons, leyline mana flow, aetherweather, a predator-prey ecology, and a myth engine that turns player deeds into named legends, constellations, omens, and familiars. wasm-clean, no I/O."
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true

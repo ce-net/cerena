@@ -33,6 +33,14 @@ impl EntityFlags {
     pub const RELOADING: u16 = 1 << 4;
     pub const DEAD: u16 = 1 << 5;
     pub const ON_GROUND: u16 = 1 << 6;
+    /// Flying under a flight movement mode (drives the client's pose + trail VFX).
+    pub const FLYING: u16 = 1 << 7;
+    /// Clinging to / climbing a sheer surface.
+    pub const CLIMBING: u16 = 1 << 8;
+    /// Running along a wall (reduced-gravity parkour state).
+    pub const WALLRUNNING: u16 = 1 << 9;
+    /// Mid melee swing (drives the first-person weapon arc + remote swing pose).
+    pub const MELEEING: u16 = 1 << 10;
 
     pub fn has(self, f: u16) -> bool {
         self.0 & f != 0

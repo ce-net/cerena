@@ -26,10 +26,17 @@
 //! `wasm32` so the client shares the exact same definitions as the authority.
 
 pub mod ability;
+pub mod affix;
 pub mod default_pack;
+pub mod enchant;
+pub mod expansion;
+pub mod forge;
 pub mod gamemode;
+pub mod gear;
+pub mod gem;
 pub mod ids;
 pub mod item;
+pub mod itemset;
 pub mod loot;
 pub mod material;
 pub mod mission;
@@ -46,9 +53,18 @@ pub mod triggers;
 pub mod tuning;
 pub mod worldgen;
 
-pub use default_pack::default_pack;
+pub use affix::{AffixDef, AffixKind};
+pub use default_pack::{default_pack, starter_pack};
+pub use enchant::{EnchantDef, RunewordDef};
+pub use forge::ForgeConfig;
 pub use gamemode::{GameModeDef, ScoringRule, TeamConfig, WinCondition};
+pub use gem::GemDef;
 pub use ids::*;
+pub use item::{
+    ElementMods, EquipSlot, ItemDef, ItemTrigger, ProcEffect, ProcWhen, Rarity, StatMods,
+    UpgradeProfile,
+};
+pub use itemset::{SetBonus, SetDef};
 pub use loot::{LootEntry, LootTableDef};
 pub use pack::ContentPack;
 pub use registry::ContentRegistry;

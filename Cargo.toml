@@ -3,7 +3,10 @@ resolver = "2"
 members = [
     "crates/arena-protocol",
     "crates/arena-content",
+    "crates/arena-anim",
     "crates/arena-procgen",
+    "crates/arena-assets",
+    "crates/arena-mythos",
     "crates/arena-sim",
     "crates/arena-net",
     "crates/arena-server",
@@ -19,7 +22,10 @@ members = [
 default-members = [
     "crates/arena-protocol",
     "crates/arena-content",
+    "crates/arena-anim",
     "crates/arena-procgen",
+    "crates/arena-assets",
+    "crates/arena-mythos",
     "crates/arena-sim",
     "crates/arena-net",
     "crates/arena-server",

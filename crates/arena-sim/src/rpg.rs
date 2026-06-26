@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use arena_content::ids::TechNodeId;
-use arena_content::item::StatMods;
+use arena_content::item::{ElementMods, StatMods};
 
 /// The four primary attributes. They rise on level-up and via gear/tech, and feed
 /// the derived stats and spell scaling.
@@ -37,13 +37,15 @@ impl Default for Attributes {
 }
 
 /// Stats derived from attributes + equipped mods + tech, recomputed each tick. These
-/// are what the rest of the sim actually consumes (pools, regen, multipliers).
+/// are what the rest of the sim actually consumes (pools, regen, multipliers). Every
+/// gear stat surfaces here so combat/movement/the proc engine read *one* struct.
 #[derive(Debug, Clone, Copy)]
 pub struct Derived {
     pub max_mana: f32,
     pub max_health: f32,
     pub max_stamina: f32,
     pub mana_regen: f32,
+    pub health_regen: f32,
     pub stamina_regen: f32,
     /// Additive bonus to base move speed (m/s).
     pub move_speed_bonus: f32,
@@ -55,6 +57,58 @@ pub struct Derived {
     pub focus: f32,
     pub agility: f32,
     pub vitality: f32,
+
+    // --- combat shaping (gear-driven; 1.0-based multipliers where noted) ---
+    /// Total crit chance (0..1), base + gear.
+    pub crit_chance: f32,
+    /// Crit damage multiplier (1.5 base + gear bonus).
+    pub crit_multiplier: f32,
+    pub lifesteal: f32,
+    pub mana_leech: f32,
+    pub health_on_kill: f32,
+    pub mana_on_kill: f32,
+    /// Melee damage multiplier (1.0 = baseline).
+    pub melee_power: f32,
+    /// Added melee reach (m).
+    pub melee_range_bonus: f32,
+    /// Attack/swing/cast cadence multiplier (>1 = faster).
+    pub attack_speed: f32,
+    pub cast_speed: f32,
+    /// Spell range / AoE / projectile-speed multipliers (1.0 = baseline).
+    pub range_mult: f32,
+    pub aoe_mult: f32,
+    pub projectile_speed_mult: f32,
+    /// Whole extra projectiles / pierce (rounded).
+    pub extra_projectiles: u32,
+    pub pierce: u32,
+    /// Splash fraction of a hit dealt to nearby foes.
+    pub area_damage: f32,
+    pub knockback_mult: f32,
+
+    // --- defence ---
+    pub armor_flat: f32,
+    /// Incoming-damage reduction fraction, capped at 0.85.
+    pub damage_reduction: f32,
+    pub block_chance: f32,
+    pub thorns: f32,
+    /// CC duration multiplier (<1 = shorter), from tenacity.
+    pub cc_duration_mult: f32,
+    pub fall_damage_mult: f32,
+
+    // --- movement extras ---
+    pub extra_jumps: u32,
+    pub dash_charges: u32,
+
+    // --- summons & economy ---
+    pub summon_power: f32,
+    pub extra_summons: u32,
+    pub magic_find: f32,
+    pub gold_find: f32,
+    pub xp_gain: f32,
+
+    // --- per-element ---
+    pub elem_damage: ElementMods,
+    pub elem_resist: ElementMods,
 }
 
 /// One character's progression and resource pools.
@@ -157,12 +211,14 @@ impl RpgState {
 
 /// The shared derivation, used by both [`RpgState::derived`] and the `Default` impl.
 fn derive(attrs: &Attributes, level: u32, mods: &StatMods) -> Derived {
+    let _ = level;
     Derived {
         // Focus and vitality drive the resource pools; gear adds flat capacity.
         max_mana: 100.0 + attrs.focus * 5.0 + mods.max_mana,
         max_health: 100.0 + attrs.vitality * 8.0 + mods.max_health,
-        max_stamina: 100.0 + attrs.agility * 2.0,
+        max_stamina: 100.0 + attrs.agility * 2.0 + mods.max_stamina,
         mana_regen: 5.0 + attrs.focus * 0.2 + mods.mana_regen,
+        health_regen: attrs.vitality * 0.1 + mods.health_regen,
         stamina_regen: 12.0 + attrs.agility * 0.3,
         move_speed_bonus: mods.move_speed + attrs.agility * 0.05,
         cooldown_reduction: mods.cooldown_reduction.clamp(0.0, 0.8),
@@ -172,6 +228,45 @@ fn derive(attrs: &Attributes, level: u32, mods: &StatMods) -> Derived {
         focus: attrs.focus + mods.focus,
         agility: attrs.agility + mods.agility,
         vitality: attrs.vitality + mods.vitality,
+
+        // Combat shaping. Base crit 5% / x1.5, raised by gear and a little by focus.
+        crit_chance: (0.05 + mods.crit_chance + attrs.focus * 0.001).clamp(0.0, 1.0),
+        crit_multiplier: 1.5 + mods.crit_damage,
+        lifesteal: mods.lifesteal,
+        mana_leech: mods.mana_leech,
+        health_on_kill: mods.health_on_kill,
+        mana_on_kill: mods.mana_on_kill,
+        melee_power: 1.0 + mods.melee_power_pct + attrs.power * 0.008,
+        melee_range_bonus: mods.melee_range,
+        attack_speed: 1.0 + mods.attack_speed_pct,
+        cast_speed: 1.0 + mods.cast_speed_pct,
+        range_mult: 1.0 + mods.range_pct,
+        aoe_mult: 1.0 + mods.aoe_radius_pct,
+        projectile_speed_mult: 1.0 + mods.projectile_speed_pct,
+        extra_projectiles: mods.extra_projectiles.round().max(0.0) as u32,
+        pierce: mods.pierce.round().max(0.0) as u32,
+        area_damage: mods.area_damage,
+        knockback_mult: 1.0 + mods.knockback_pct,
+
+        // Defence. Flat armor + a percentage pool, capped so you can't hit immortality.
+        armor_flat: mods.armor,
+        damage_reduction: mods.armor_pct.clamp(0.0, 0.85),
+        block_chance: mods.block_chance.clamp(0.0, 0.75),
+        thorns: mods.thorns,
+        cc_duration_mult: (1.0 - mods.tenacity).clamp(0.1, 1.0),
+        fall_damage_mult: (1.0 - mods.fall_damage_pct).clamp(0.0, 1.0),
+
+        extra_jumps: mods.jump_count.round().max(0.0) as u32,
+        dash_charges: mods.dash_charges.round().max(0.0) as u32,
+
+        summon_power: 1.0 + mods.summon_power_pct,
+        extra_summons: mods.summon_count.round().max(0.0) as u32,
+        magic_find: mods.magic_find,
+        gold_find: mods.gold_find,
+        xp_gain: mods.xp_gain_pct,
+
+        elem_damage: mods.elem_damage,
+        elem_resist: mods.elem_resist,
     }
 }
 

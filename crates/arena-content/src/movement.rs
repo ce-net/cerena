@@ -43,6 +43,24 @@ pub enum MovementKind {
     Slide { speed: f32, duration_s: f32 },
     /// Sustained sprint multiplying base move speed by `speed_mult`.
     Sprint { speed_mult: f32 },
+    /// Free 3D flight while the fly intent is held: move toward the full view ray at
+    /// `speed` (reached with `accel`), with jump/crouch overriding vertical at
+    /// `ascend_speed`. Gravity is suppressed. A continuous mode (shapes `MoveParams`),
+    /// draining stamina/mana as upkeep.
+    Fly {
+        speed: f32,
+        accel: f32,
+        ascend_speed: f32,
+    },
+    /// Convert and amplify existing momentum: scale current horizontal velocity by
+    /// `boost_mult` and add a flat `impulse` burst along the aim, but only when
+    /// already moving faster than `min_speed` (so it rewards flow — chaining off a
+    /// slide, wall-run, or grapple — rather than starting from a standstill).
+    MomentumBoost {
+        boost_mult: f32,
+        min_speed: f32,
+        impulse: f32,
+    },
 }
 
 /// A movement mode definition: a kinematic primitive plus its resource costs. The

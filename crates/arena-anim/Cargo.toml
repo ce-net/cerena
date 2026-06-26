@@ -1,0 +1,12 @@
+[package]
+name = "arena-anim"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic, wasm-clean animation: skeletons, poses, clips, IK, springs, and procedural role-driven locomotion. No GPU, no I/O — shared by client, assets, and sim."
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true

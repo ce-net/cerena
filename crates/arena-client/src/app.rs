@@ -43,6 +43,7 @@ use arena_protocol::message::{ClientMsg, ServerMsg};
 use arena_protocol::{EntityId, NodeId, TICK_DT};
 
 use crate::camera::Camera;
+use crate::feedback::{Feedback, LocalView};
 use crate::gpu::Gpu;
 use crate::hotreload::HotReload;
 use crate::hud::HudState;
@@ -79,6 +80,8 @@ pub struct App {
     input: Input,
     hud: HudState,
     particles: ParticleSystem,
+    /// Game-feel: trauma camera shake, view kick, screen flash (driven by events).
+    feedback: Feedback,
 
     /// Live content + the hot-reload driver.
     registry: ContentRegistry,
@@ -140,6 +143,7 @@ impl App {
             input: Input::new(),
             hud: HudState::new(),
             particles: ParticleSystem::new(),
+            feedback: Feedback::new(),
             registry,
             hotreload: HotReload::new(),
             net,
@@ -236,6 +240,11 @@ impl App {
         self.camera.pitch = pitch;
         entities.retain(|e| e.id != self.local_id);
 
+        // Advance the feel springs and stamp shake/kick/lurch onto the camera *after*
+        // it has been snapped onto the player, so the wobble rides on top of aim.
+        self.feedback.update(dt);
+        self.feedback.apply(&mut self.camera);
+
         // --- 4. advance cosmetics, then draw ---
         self.particles.update(dt);
         self.hud.set_rtt(self.cw.rtt_ms());
@@ -270,8 +279,16 @@ impl App {
 
                 self.hud.apply_local(&local);
                 self.hud.ingest_events(&events, &self.local_node);
+                // Feel: interpret events from the local player's vantage (eye = pos +
+                // eye offset) into camera shake / kick / flash.
+                let view = LocalView {
+                    id: local.entity,
+                    eye: local.state.pos + glam::Vec3::Y * crate::EYE_OFFSET_M,
+                    yaw: local.state.yaw,
+                };
                 for ev in &events {
                     self.particles.spawn_from_event(ev);
+                    self.feedback.ingest(ev, &view);
                 }
             }
             ServerMsg::Redirect { entity, .. } => {

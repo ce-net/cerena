@@ -229,7 +229,10 @@ fn eval_inner(
         }
         EffectOp::Heal { amount } => {
             let who = target_entity(ctx, target).unwrap_or(ctx.caster);
-            world.heal_entity(who, amount * ctx.damage_mult);
+            let healed = amount * ctx.damage_mult;
+            world.heal_entity(who, healed);
+            // Feedback: floating restore motes + a soft green flash on the healed one.
+            events.push(GameEvent::Heal { target: who, amount: healed });
         }
         EffectOp::Shield { amount, duration_s } => {
             let who = target_entity(ctx, target).unwrap_or(ctx.caster);
@@ -238,11 +241,22 @@ fn eval_inner(
         EffectOp::ApplyStatus { status, duration_s, stacks } => {
             if let Some(victim) = target_entity(ctx, target) {
                 world.apply_status_to(victim, status, *duration_s, *stacks, ctx.tick, ctx.caster);
+                // Feedback: buff bloom (gold) vs debuff pulse (sickly), by polarity.
+                let beneficial = world.status_beneficial(status);
+                events.push(GameEvent::Buff { entity: victim, beneficial });
             }
         }
         EffectOp::Impulse { force, vertical_bias } => {
             if let Some(victim) = target_entity(ctx, target) {
-                world.apply_impulse(victim, ctx, *force, *vertical_bias);
+                world.apply_impulse(victim, ctx, *force, *vertical_bias, events);
+            }
+        }
+        EffectOp::Vortex { strength, vertical_bias } => {
+            // Radial force relative to the *current cast centre* (ctx.origin): the
+            // impact point of a projectile, a field's centre, or the caster's aim.
+            // Positive pulls inward (gravity well), negative shoves outward (blast).
+            if let Some(victim) = target_entity(ctx, target) {
+                world.apply_vortex(victim, ctx.origin, *strength, *vertical_bias, events);
             }
         }
         EffectOp::Teleport { max_distance, to_target } => {

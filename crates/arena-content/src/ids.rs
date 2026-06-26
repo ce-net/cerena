@@ -58,3 +58,8 @@ content_id!(GameModeId, "A set of gameplay rules (win/scoring/teams). Hot-swappa
 content_id!(TriggerId, "A data-driven event->action rule (the designer's scripting unit).");
 content_id!(LootTableId, "A named, weighted loot table rolled on kills/missions/death.");
 content_id!(SpawnRuleId, "A data-driven world spawn rule (what populates the open world).");
+content_id!(AffixId, "A rollable magic property (prefix/suffix) on an item instance.");
+content_id!(GemId, "A socketable gem/rune; reads differently in weapons vs armor.");
+content_id!(SetId, "A gear set; wearing N pieces unlocks escalating set bonuses.");
+content_id!(EnchantId, "A permanent enchant layered onto an item instance.");
+content_id!(RunewordId, "A named gem/rune sequence that activates a powerful combined bonus.");

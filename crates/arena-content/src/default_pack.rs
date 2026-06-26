@@ -68,8 +68,14 @@ fn spell(
 }
 
 /// Build the full default content pack.
+///
+/// This is the starter game (the four foundational schools) with the
+/// *Tempest, Verdance & the Hollow Dead* expansion ([`crate::expansion`]) folded in.
+/// The expansion is pure additive data — new spells, statuses, items, mobs (including
+/// bosses), four new tech branches, two new biomes, and two new game modes — so the
+/// combined pack still passes [`ContentPack::validate`].
 pub fn default_pack() -> ContentPack {
-    ContentPack {
+    let mut pack = ContentPack {
         label: "cerena-default-0.2".to_string(),
         spells: spells(),
         items: items(),
@@ -87,6 +93,45 @@ pub fn default_pack() -> ContentPack {
         loot_tables: loot_tables(),
         spawn_rules: spawn_rules(),
         triggers: triggers(),
+        affixes: vec![],
+        gems: vec![],
+        item_sets: vec![],
+        enchants: vec![],
+        runewords: vec![],
+        forge: crate::forge::ForgeConfig::default(),
+    };
+    crate::expansion::apply(&mut pack);
+    crate::gear::apply(&mut pack);
+    pack
+}
+
+/// Build only the starter pack, without the expansion — useful for tests and for
+/// minimal/clean-room sessions that want just the four foundational schools.
+pub fn starter_pack() -> ContentPack {
+    ContentPack {
+        label: "cerena-starter-0.2".to_string(),
+        spells: spells(),
+        items: items(),
+        abilities: abilities(),
+        tech: tech_tree(),
+        statuses: statuses(),
+        movement_modes: movement_modes(),
+        materials: materials(),
+        shaders: shaders(),
+        worldgen: WorldGenParams::default(),
+        mobs: mobs(),
+        missions: missions(),
+        tuning: TuningConfig::default(),
+        game_modes: game_modes(),
+        loot_tables: loot_tables(),
+        spawn_rules: spawn_rules(),
+        triggers: triggers(),
+        affixes: vec![],
+        gems: vec![],
+        item_sets: vec![],
+        enchants: vec![],
+        runewords: vec![],
+        forge: crate::forge::ForgeConfig::default(),
     }
 }
 
@@ -388,6 +433,102 @@ fn spells() -> Vec<SpellDef> {
             Scaling::default(),
             EffectOp::RestoreMana { amount: 80.0 },
         ),
+        // Gravity Well: a lingering singularity that drags foes inward, crushing and
+        // slowing them while they are held — a sustained gravity spell. The field's
+        // tick op runs against everything inside, pulling each toward the well centre.
+        spell(
+            "spell.gravity_well",
+            "Gravity Well",
+            "Tear open a pit of crushing gravity that hauls foes to its heart and grinds them down.",
+            "void",
+            48.0,
+            0.7,
+            11.0,
+            false,
+            Scaling { power: 0.5, focus: 0.7, agility: 0.0, level: 0.6 },
+            EffectOp::Field {
+                radius: 7.0,
+                duration_s: 4.0,
+                interval_s: 0.25,
+                faction: Faction::Enemies,
+                tick: b(EffectOp::Parallel(vec![
+                    // Strong inward pull toward the well centre (positive = inward).
+                    EffectOp::Vortex { strength: 14.0, vertical_bias: -0.1 },
+                    EffectOp::Damage { amount: 8.0, element: ElementId::new("void") },
+                    EffectOp::ApplyStatus {
+                        status: StatusId::new("status.slow"),
+                        duration_s: 0.5,
+                        stacks: 1,
+                    },
+                ])),
+            },
+        ),
+        // Singularity: a slow heavy orb that collapses on impact — first imploding
+        // everything inward, then detonating outward. A gravity spell *with* an
+        // explosion, the showcase of the Vortex primitive in both directions.
+        spell(
+            "spell.singularity",
+            "Singularity",
+            "Loose a dark star that implodes on impact, then erupts, hurling the gathered foes away.",
+            "void",
+            70.0,
+            1.2,
+            14.0,
+            false,
+            Scaling { power: 1.0, focus: 0.6, agility: 0.0, level: 0.8 },
+            EffectOp::Projectile {
+                speed: 24.0,
+                gravity: 1.0,
+                radius: 0.7,
+                lifetime_s: 5.0,
+                homing: 0.2,
+                on_hit: b(EffectOp::Sequence(vec![
+                    // Implode: yank everything in a wide radius toward the impact.
+                    EffectOp::Area {
+                        radius: 8.0,
+                        faction: Faction::Enemies,
+                        falloff: 0.8,
+                        then: b(EffectOp::Vortex { strength: 26.0, vertical_bias: 0.1 }),
+                    },
+                    // A breath later, the star collapses and blows back out.
+                    EffectOp::Delay {
+                        secs: 0.4,
+                        then: b(EffectOp::Area {
+                            radius: 6.0,
+                            faction: Faction::Enemies,
+                            falloff: 0.4,
+                            then: b(EffectOp::Sequence(vec![
+                                EffectOp::Damage { amount: 95.0, element: ElementId::new("void") },
+                                EffectOp::Vortex { strength: -28.0, vertical_bias: 0.5 },
+                            ])),
+                        }),
+                    },
+                ])),
+            },
+        ),
+        // Repulsion Nova: an instant shockwave centred on the caster that flings every
+        // nearby foe outward and off their feet — a panic button / gap-maker.
+        spell(
+            "spell.repulsion_nova",
+            "Repulsion Nova",
+            "Erupt with a ring of force that throws everything around you violently outward.",
+            "storm",
+            32.0,
+            0.0,
+            7.0,
+            false,
+            Scaling { power: 0.7, focus: 0.3, agility: 0.2, level: 0.5 },
+            EffectOp::Area {
+                radius: 6.0,
+                faction: Faction::Enemies,
+                falloff: 0.5,
+                then: b(EffectOp::Sequence(vec![
+                    EffectOp::Damage { amount: 35.0, element: ElementId::new("storm") },
+                    // Negative strength = outward shove from the caster's position.
+                    EffectOp::Vortex { strength: -22.0, vertical_bias: 0.6 },
+                ])),
+            },
+        ),
     ]
 }
 
@@ -586,6 +727,23 @@ fn movement_modes() -> Vec<MovementModeDef> {
             cooldown: 0.0,
             stamina_cost: 4.0,
         },
+        MovementModeDef {
+            id: MovementModeId::new("movement.fly"),
+            name: "Levitation Flight".into(),
+            kind: MovementKind::Fly { speed: 16.0, accel: 22.0, ascend_speed: 10.0 },
+            // Continuous upkeep: charged per-tick by the sim while flight is held.
+            mana_cost: 6.0,
+            cooldown: 0.0,
+            stamina_cost: 0.0,
+        },
+        MovementModeDef {
+            id: MovementModeId::new("movement.momentum_boost"),
+            name: "Momentum Surge".into(),
+            kind: MovementKind::MomentumBoost { boost_mult: 1.5, min_speed: 6.0, impulse: 10.0 },
+            mana_cost: 0.0,
+            cooldown: 1.2,
+            stamina_cost: 12.0,
+        },
     ]
 }
 
@@ -612,6 +770,7 @@ fn items() -> Vec<ItemDef> {
             on_use: None,
             level_req: 0,
             craft: None,
+            ..Default::default()
         },
         ItemDef {
             id: ItemId::new("item.void_essence"),
@@ -629,6 +788,7 @@ fn items() -> Vec<ItemDef> {
             on_use: None,
             level_req: 0,
             craft: None,
+            ..Default::default()
         },
         // Staves — primary spell sources.
         ItemDef {
@@ -647,6 +807,7 @@ fn items() -> Vec<ItemDef> {
             on_use: None,
             level_req: 1,
             craft: None,
+            ..Default::default()
         },
         ItemDef {
             id: ItemId::new("item.frost_staff"),
@@ -664,6 +825,31 @@ fn items() -> Vec<ItemDef> {
             on_use: None,
             level_req: 1,
             craft: None,
+            ..Default::default()
+        },
+        // Runeblade — a melee-forward weapon. Held in the Staff slot, it trades a
+        // little spell focus for the raw power that scales the melee swing (see
+        // `TuningConfig::melee_power_scale`), so a battlemage can wade in and cut.
+        ItemDef {
+            id: ItemId::new("item.runeblade"),
+            name: "Runeblade".into(),
+            description: "A humming length of rune-etched steel. It answers a swing as readily as a spell.".into(),
+            rarity: Rarity::Epic,
+            slot: EquipSlot::Staff,
+            stat_mods: StatMods { power: 22.0, agility: 6.0, spell_power_pct: 0.05, ..Default::default() },
+            grants_spells: vec![SpellId::new("spell.arcane_lance")],
+            grants_movement: vec![MovementModeId::new("movement.momentum_boost")],
+            grants_abilities: vec![AbilityId::new("ability.arcane_lance")],
+            material: Some(MaterialId::new("material.crystal")),
+            stackable: false,
+            max_stack: 1,
+            on_use: None,
+            level_req: 7,
+            craft: Some(CraftRecipe {
+                inputs: vec![(ItemId::new("item.crystal_shard"), 6)],
+                tech_req: None,
+            }),
+            ..Default::default()
         },
         // Relic / orb — arcane focus.
         ItemDef {
@@ -682,6 +868,7 @@ fn items() -> Vec<ItemDef> {
             on_use: None,
             level_req: 5,
             craft: None,
+            ..Default::default()
         },
         ItemDef {
             id: ItemId::new("item.void_relic"),
@@ -690,9 +877,18 @@ fn items() -> Vec<ItemDef> {
             rarity: Rarity::Legendary,
             slot: EquipSlot::Relic,
             stat_mods: StatMods { power: 18.0, focus: 10.0, spell_power_pct: 0.15, ..Default::default() },
-            grants_spells: vec![SpellId::new("spell.void_grasp"), SpellId::new("spell.life_siphon")],
+            grants_spells: vec![
+                SpellId::new("spell.void_grasp"),
+                SpellId::new("spell.life_siphon"),
+                SpellId::new("spell.gravity_well"),
+                SpellId::new("spell.singularity"),
+            ],
             grants_movement: vec![],
-            grants_abilities: vec![AbilityId::new("ability.void_grasp")],
+            grants_abilities: vec![
+                AbilityId::new("ability.void_grasp"),
+                AbilityId::new("ability.gravity_well"),
+                AbilityId::new("ability.singularity"),
+            ],
             material: Some(MaterialId::new("material.void_fog")),
             stackable: false,
             max_stack: 1,
@@ -702,17 +898,21 @@ fn items() -> Vec<ItemDef> {
                 inputs: vec![(ItemId::new("item.void_essence"), 5), (ItemId::new("item.crystal_shard"), 3)],
                 tech_req: Some(TechNodeId::new("tech.arcana_4")),
             }),
+            ..Default::default()
         },
         // Boots / mobility gear.
         ItemDef {
             id: ItemId::new("item.swiftboots"),
             name: "Swiftboots".into(),
-            description: "Feather-light boots that let you burst across the ground.".into(),
+            description: "Feather-light boots that let you burst across the ground and surge on a roll.".into(),
             rarity: Rarity::Uncommon,
             slot: EquipSlot::Boots,
             stat_mods: StatMods { agility: 8.0, move_speed: 1.0, ..Default::default() },
             grants_spells: vec![],
-            grants_movement: vec![MovementModeId::new("movement.dash")],
+            grants_movement: vec![
+                MovementModeId::new("movement.dash"),
+                MovementModeId::new("movement.momentum_boost"),
+            ],
             grants_abilities: vec![],
             material: Some(MaterialId::new("material.bark")),
             stackable: false,
@@ -720,6 +920,7 @@ fn items() -> Vec<ItemDef> {
             on_use: None,
             level_req: 1,
             craft: None,
+            ..Default::default()
         },
         ItemDef {
             id: ItemId::new("item.grapple_glove"),
@@ -737,16 +938,20 @@ fn items() -> Vec<ItemDef> {
             on_use: None,
             level_req: 4,
             craft: None,
+            ..Default::default()
         },
         ItemDef {
             id: ItemId::new("item.glider_cloak"),
             name: "Glider Cloak".into(),
-            description: "A membranous cloak that catches the wind and stretches your leaps.".into(),
+            description: "A membranous cloak that catches the wind, stretches your leaps, and — fully unfurled — bears you aloft.".into(),
             rarity: Rarity::Rare,
             slot: EquipSlot::Trinket,
             stat_mods: StatMods { agility: 5.0, move_speed: 0.5, ..Default::default() },
             grants_spells: vec![],
-            grants_movement: vec![MovementModeId::new("movement.glide")],
+            grants_movement: vec![
+                MovementModeId::new("movement.glide"),
+                MovementModeId::new("movement.fly"),
+            ],
             grants_abilities: vec![],
             material: Some(MaterialId::new("material.bark")),
             stackable: false,
@@ -754,6 +959,7 @@ fn items() -> Vec<ItemDef> {
             on_use: None,
             level_req: 6,
             craft: None,
+            ..Default::default()
         },
         // Robes.
         ItemDef {
@@ -772,6 +978,7 @@ fn items() -> Vec<ItemDef> {
             on_use: None,
             level_req: 1,
             craft: None,
+            ..Default::default()
         },
         ItemDef {
             id: ItemId::new("item.archmage_robe"),
@@ -799,6 +1006,7 @@ fn items() -> Vec<ItemDef> {
                 inputs: vec![(ItemId::new("item.crystal_shard"), 8), (ItemId::new("item.void_essence"), 2)],
                 tech_req: Some(TechNodeId::new("tech.arcana_2")),
             }),
+            ..Default::default()
         },
         // Amulet.
         ItemDef {
@@ -823,6 +1031,7 @@ fn items() -> Vec<ItemDef> {
             on_use: None,
             level_req: 20,
             craft: None,
+            ..Default::default()
         },
         // Ring.
         ItemDef {
@@ -832,15 +1041,22 @@ fn items() -> Vec<ItemDef> {
             rarity: Rarity::Epic,
             slot: EquipSlot::Ring,
             stat_mods: StatMods { power: 10.0, focus: 8.0, cooldown_reduction: 0.08, ..Default::default() },
-            grants_spells: vec![SpellId::new("spell.chain_lightning")],
+            grants_spells: vec![
+                SpellId::new("spell.chain_lightning"),
+                SpellId::new("spell.repulsion_nova"),
+            ],
             grants_movement: vec![],
-            grants_abilities: vec![AbilityId::new("ability.chain_lightning")],
+            grants_abilities: vec![
+                AbilityId::new("ability.chain_lightning"),
+                AbilityId::new("ability.repulsion_nova"),
+            ],
             material: Some(MaterialId::new("material.crystal")),
             stackable: false,
             max_stack: 1,
             on_use: None,
             level_req: 8,
             craft: None,
+            ..Default::default()
         },
         // Consumable.
         ItemDef {
@@ -862,6 +1078,7 @@ fn items() -> Vec<ItemDef> {
                 inputs: vec![(ItemId::new("item.crystal_shard"), 2)],
                 tech_req: None,
             }),
+            ..Default::default()
         },
     ]
 }
@@ -895,6 +1112,9 @@ fn abilities() -> Vec<AbilityDef> {
         ab("ability.ground_slam", "Ground Slam", "spell.ground_slam", CastInput::Slot(6)),
         ab("ability.life_siphon", "Life Siphon", "spell.life_siphon", CastInput::Slot(7)),
         ab("ability.storm_field", "Storm Field", "spell.storm_field", CastInput::Slot(8)),
+        ab("ability.gravity_well", "Gravity Well", "spell.gravity_well", CastInput::Slot(9)),
+        ab("ability.singularity", "Singularity", "spell.singularity", CastInput::Slot(10)),
+        ab("ability.repulsion_nova", "Repulsion Nova", "spell.repulsion_nova", CastInput::Secondary),
     ]
 }
 

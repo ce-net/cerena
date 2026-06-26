@@ -18,7 +18,9 @@
 //! | Mouse Right           | ALT_FIRE                       | **secondary cast** (charge/aim) |
 //! | R                     | RELOAD                         | recharge / reattune the focus   |
 //! | E                     | USE                            | interact / channel              |
-//! | Q                     | MELEE                          | melee / staff strike            |
+//! | Q                     | MELEE                          | **melee weapon strike** (combos) |
+//! | F                     | MOVE_ABILITY                   | dash / blink / grapple / surge  |
+//! | V                     | FLY                            | hold to fly (with a flight mode) |
 //! | 1..=6                 | weapon_slot                    | select the active ability slot  |
 //! | Mouse move            | yaw / pitch                    | look (intent direction)         |
 //!
@@ -94,6 +96,8 @@ impl Input {
             KeyCode::KeyR => self.buttons.set(Buttons::RELOAD, pressed),
             KeyCode::KeyE => self.buttons.set(Buttons::USE, pressed),
             KeyCode::KeyQ => self.buttons.set(Buttons::MELEE, pressed),
+            KeyCode::KeyF => self.buttons.set(Buttons::MOVE_ABILITY, pressed),
+            KeyCode::KeyV => self.buttons.set(Buttons::FLY, pressed),
             // Ability-slot selection on key-down only (edge, not hold).
             KeyCode::Digit1 if pressed => self.slot = 0,
             KeyCode::Digit2 if pressed => self.slot = 1,

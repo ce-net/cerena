@@ -153,6 +153,14 @@ pub enum EffectOp {
     ApplyStatus { status: StatusId, duration_s: f32, stacks: u8 },
     /// Push (+) or pull (-) the target relative to a point with `force`.
     Impulse { force: f32, vertical_bias: f32 },
+    /// Gravity-style radial force toward (positive `strength`) or away from
+    /// (negative) the *current cast centre* — the impact point of a projectile, the
+    /// centre of a [`EffectOp::Field`], or the caster's aim point. Unlike
+    /// [`EffectOp::Impulse`] (which is relative to the caster), this is relative to
+    /// the effect's own origin, so `Field { tick: Vortex { strength: + } }` is a
+    /// sustained gravity well that sucks foes inward, and `Area { Vortex { strength:
+    /// - } }` is an explosive shove that flings them outward from the blast.
+    Vortex { strength: f32, vertical_bias: f32 },
     /// Teleport / blink the caster (or target) by `distance` along aim, or to a point.
     Teleport { max_distance: f32, to_target: bool },
     /// Summon a mob under the caster's ownership for `duration_s`.

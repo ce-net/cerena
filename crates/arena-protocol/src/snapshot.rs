@@ -14,9 +14,28 @@ use crate::{
     world::Team,
 };
 
+/// The flavour of a melee swing, so the client picks the right weapon arc, sound,
+/// and screen kick. The combo escalates Slash -> Thrust -> Spin as a player chains
+/// strikes inside the combo window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum MeleeKind {
+    /// Horizontal sweep (combo step 0).
+    Slash = 0,
+    /// Forward lunge (combo step 1).
+    Thrust = 1,
+    /// Spinning finisher with wide knockback (combo step 2+).
+    Spin = 2,
+}
+
 /// A discrete, one-shot thing that happened this tick: a shot, a hit, a death.
 /// Events are not delta-encoded; they are reliable-ish (re-sent until acked for
 /// the few that matter, like kills) and drive client VFX/SFX and the kill feed.
+///
+/// The later variants ([`GameEvent::Melee`] onward) are the **feedback channel**:
+/// they carry the semantic detail the client needs to make combat *feel* — a melee
+/// arc, a knockback shove, a buff bloom, a heal tick, an explicit camera-shake hint —
+/// without the client having to re-derive intent from raw state deltas.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GameEvent {
     /// A weapon was fired from `origin` along `dir` by `shooter`. Clients play
@@ -51,6 +70,35 @@ pub enum GameEvent {
     PickupTaken { pickup: EntityId, by: EntityId },
     /// Free-form chat / system line scoped to the AOI.
     Chat { from: NodeId, text: String },
+
+    // ---- feedback channel ----
+    /// A melee weapon swing. `victim` is `Some` only when the arc connected; `hit`
+    /// mirrors that for callers that do not care who. Drives the first-person weapon
+    /// arc, the swing whoosh, the connect "thunk", and a directional screen kick.
+    Melee {
+        attacker: EntityId,
+        victim: Option<EntityId>,
+        origin: Vec3,
+        dir: Vec3,
+        kind: MeleeKind,
+        /// Post-mitigation damage dealt (0 on a whiff).
+        damage: f32,
+    },
+    /// A force shoved `entity` by `impulse` (m/s applied this tick). Knockback,
+    /// gravity pulls, explosion shoves. The client turns this into a camera lurch on
+    /// the local player and a stagger lean / dust kick on remotes.
+    Knockback { entity: EntityId, impulse: Vec3 },
+    /// A status effect landed on `entity`. `beneficial` tints the bloom (gold buff vs
+    /// sickly debuff) and decides whether the local player sees a buff flare or a
+    /// damage-y vignette pulse.
+    Buff { entity: EntityId, beneficial: bool },
+    /// `target` was healed for `amount`. Drives floating green motes + a soft restore
+    /// flash when it is the local player.
+    Heal { target: EntityId, amount: f32 },
+    /// An explicit camera-shake hint centred at `center` with normalised `trauma`
+    /// (0..1). Big set-pieces (meteor, singularity collapse) emit this so the shake is
+    /// authored rather than purely derived; the client scales it by proximity.
+    Shake { center: Vec3, trauma: f32 },
 }
 
 /// The authoritative state for the local player, sent every snapshot so the

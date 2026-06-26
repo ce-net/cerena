@@ -105,7 +105,18 @@ impl ParticleSystem {
             GameEvent::Spawn { pos, .. } => {
                 self.burst_cone(*pos, Vec3::Y, 20, 2.0, [0.5, 0.8, 1.0], 0.08, 0.6);
             }
-            // Deaths/pickups/chat carry no positional VFX here (kill-feed is HUD).
+            // A melee swing: a thin, fast arc of sparks thrown along the blade path.
+            // (Melee is the one feedback event that carries a world origin; the
+            // entity-targeted feedback events — Knockback / Heal / Buff — have no wire
+            // position, so their *visual* read is handled by the camera-feel layer in
+            // `crate::feedback` rather than spawned here at a bogus origin.)
+            GameEvent::Melee { origin, dir, victim, .. } => {
+                let n = if victim.is_some() { 22 } else { 12 };
+                let color = if victim.is_some() { [1.0, 0.85, 0.6] } else { [0.85, 0.9, 1.0] };
+                self.burst_cone(*origin + *dir, *dir, n, 9.0, color, 0.04, 0.18);
+            }
+            // Deaths/pickups/chat/shake + entity-targeted feedback carry no positional
+            // VFX here (kill-feed, camera shake and flashes own those reads).
             _ => {}
         }
     }

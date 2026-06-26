@@ -75,6 +75,26 @@ pub struct TuningConfig {
     /// Global multiplier applied to damage from a headshot/critical hit location.
     pub headshot_mult_global: f32,
 
+    // ---- melee / sword fighting (arena-sim melee system) ----
+    /// Base damage of a melee weapon strike before combo and power scaling.
+    pub melee_damage: f32,
+    /// Reach of the melee arc in metres.
+    pub melee_range: f32,
+    /// Half-angle of the melee arc in radians (the swing's width).
+    pub melee_arc_rad: f32,
+    /// Seconds between swings (the swing recovery / attack-speed gate).
+    pub melee_swing_s: f32,
+    /// Outward knockback velocity (m/s) imparted to a struck foe.
+    pub melee_knockback: f32,
+    /// Seconds after a swing during which the next swing chains the combo. Miss the
+    /// window and the combo resets to the opening Slash.
+    pub melee_combo_window_s: f32,
+    /// Per-combo-step damage growth (e.g. `0.35` = +35% damage at each chained step).
+    pub melee_combo_mult: f32,
+    /// Fraction (0..1) of melee damage a [`crate::item::StatMods::power`] point adds,
+    /// so a heavier staff hits harder in the hand as well as at range.
+    pub melee_power_scale: f32,
+
     // ---- progression (the XP curve and per-level point grants) ----
     /// Base of the level XP curve: `xp_to(level) = xp_curve_base * level^xp_curve_exp`.
     pub xp_curve_base: f32,
@@ -126,6 +146,15 @@ impl Default for TuningConfig {
 
             spell_global_cooldown: 0.25,
             headshot_mult_global: 2.0,
+
+            melee_damage: 28.0,
+            melee_range: 3.2,
+            melee_arc_rad: 0.9,
+            melee_swing_s: 0.45,
+            melee_knockback: 9.0,
+            melee_combo_window_s: 1.2,
+            melee_combo_mult: 0.35,
+            melee_power_scale: 0.6,
 
             xp_curve_base: 100.0,
             xp_curve_exp: 1.5,
