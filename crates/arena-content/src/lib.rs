@@ -26,6 +26,7 @@
 //! `wasm32` so the client shares the exact same definitions as the authority.
 
 pub mod ability;
+pub mod default_pack;
 pub mod ids;
 pub mod item;
 pub mod material;
@@ -40,6 +41,7 @@ pub mod status;
 pub mod tech;
 pub mod worldgen;
 
+pub use default_pack::default_pack;
 pub use ids::*;
 pub use pack::ContentPack;
 pub use registry::ContentRegistry;
