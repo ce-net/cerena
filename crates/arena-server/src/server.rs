@@ -355,14 +355,16 @@ impl Engine {
                     }));
                     return;
                 };
-                // We need the router for authority selection; borrow it via the manager.
-                let decision = {
-                    // ZoneManager exposes authority_for; build a transient view by querying it.
-                    // (handle_join only needs authority_for(zone), which the router provides.)
-                    coord.handle_join_with(&ticket, team_pref, &from, &self.node_id, now_unix(), |zone| {
-                        self.manager.authority_for(zone)
-                    })
-                };
+                // Disjoint field borrows: the coordinator (mut) decides admission while the
+                // closure queries the manager's (shared) HRW router for the spawn-zone owner.
+                let decision = coord.handle_join(
+                    &ticket,
+                    team_pref,
+                    &from,
+                    &self.node_id,
+                    now_unix(),
+                    |zone| self.manager.authority_for(zone),
+                );
                 match decision {
                     JoinDecision::Reject(reason) => {
                         let _ = reply.send(server(ServerMsg::JoinReject { reason }));

@@ -19,7 +19,7 @@ use arena_karma::{KarmaLedger, SuspicionScore, Verdict};
 use arena_protocol::auth::{SessionId, SessionTicket};
 use arena_protocol::karma::{KarmaAction, KarmaUpdate};
 use arena_protocol::world::{MapId, Team, ZoneId};
-use arena_protocol::{NodeId, Tick};
+use arena_protocol::NodeId;
 
 use arena_content::hotreload::ContentVersion;
 use arena_content::ContentPack;
@@ -212,10 +212,6 @@ impl Coordinator {
     pub fn action(&self, node: &NodeId) -> KarmaAction {
         self.ledger.action(node)
     }
-
-    /// Ticks-since-epoch helper is the engine's concern; the coordinator never reads time.
-    /// (Kept here so the field is documented as the policy clock the engine supplies.)
-    pub fn now_marker(_tick: Tick) {}
 }
 
 #[cfg(test)]
@@ -239,9 +235,11 @@ mod tests {
     fn insecure_join_admits_to_spawn_zone() {
         let session = SessionId("s".into());
         let mut c = Coordinator::new(session.clone(), MapId("m".into()), true, "me".into(), 1, "hash".into());
-        let router = ZoneRouter::new(session.clone(), vec![Candidate::new("me", 0)]);
+        let candidates = vec![Candidate::new("me", 0)];
         let t = ticket("player-a", &session, 0); // expired ticket, but e2e_insecure ignores it
-        let decision = c.handle_join(&t, Some(Team::Red), &"player-a".into(), &router, &"me".into(), 1000);
+        let decision = c.handle_join(&t, Some(Team::Red), &"player-a".into(), &"me".into(), 1000, |z| {
+            assign_authority(&session, z, &candidates)
+        });
         match decision {
             JoinDecision::Accept { zone, authority, team } => {
                 assert_eq!(zone, SPAWN_ZONE);
@@ -256,11 +254,13 @@ mod tests {
     fn banned_player_is_rejected() {
         let session = SessionId("s".into());
         let mut c = Coordinator::new(session.clone(), MapId("m".into()), true, "me".into(), 1, "hash".into());
-        let router = ZoneRouter::new(session.clone(), vec![Candidate::new("me", 0)]);
+        let candidates = vec![Candidate::new("me", 0)];
         // Drive the player below the temp-ban line.
         c.ledger.apply(&"cheat".into(), -200, "test", 1);
         let t = ticket("cheat", &session, 0);
-        let decision = c.handle_join(&t, None, &"cheat".into(), &router, &"me".into(), 1000);
+        let decision = c.handle_join(&t, None, &"cheat".into(), &"me".into(), 1000, |z| {
+            assign_authority(&session, z, &candidates)
+        });
         assert!(matches!(decision, JoinDecision::Reject(_)));
     }
 
