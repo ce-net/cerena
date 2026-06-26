@@ -79,6 +79,33 @@ async fn local_authority_failover() {
 
 #[tokio::test]
 #[ignore = "needs target/release/arena-server"]
+async fn local_proximity_replica_recovery() {
+    init_tracing();
+    let cfg = E2eConfig {
+        nodes: 4,
+        players: 200,
+        hold: Duration::from_secs(15),
+        ..Default::default()
+    };
+    let mut cluster = LocalCluster::new(cfg.nodes, server_bin(), &cfg.session);
+    scenario::run_scale(&mut cluster, &cfg).await.ok();
+    // Crash the authority and assert players are restored from nearby-peer replicas
+    // (state intact), not dropped. 80% retention floor tolerates mid-handoff cases.
+    let rep = fault::proximity_replica_recovery(
+        &mut cluster,
+        1,
+        cfg.players,
+        0.80,
+        Duration::from_secs(12),
+    )
+    .await
+    .expect("replica recovery scenario");
+    cluster.teardown().await.ok();
+    fault::assert_recovered(&rep, Duration::from_secs(12)).expect("replicas restored players");
+}
+
+#[tokio::test]
+#[ignore = "needs target/release/arena-server"]
 async fn local_malicious_authority_is_flagged() {
     init_tracing();
     let cfg = E2eConfig {

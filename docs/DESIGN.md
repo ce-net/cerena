@@ -35,6 +35,35 @@ neighbours), so per-client bandwidth is flat regardless of total population.
 10k players / ~50 players-per-zone ⇒ ~200 active zones, spread across ~200 well-
 staked nodes. The map is effectively unbounded; new zones spin up as players spread.
 
+### 1a. Redundancy — proximity replication (no lost state on a crash)
+
+A zone authority is a single point of failure for the players in its zone. Losing
+it must lose **nothing**. So each player's *full* authoritative state — transform,
+health, **and** the sim-owned progression (XP, level, mana, inventory, statuses,
+unlocked tech) — is checkpointed every ~1 s and replicated to the **K nearest other
+players** (default K=3). Those peers are already exchanging packets with you (you're
+in each other's AOI), so it's cheap, and they fail *independently* of the authority.
+
+The mechanism (`arena-server::replication`, wire types in
+`arena-protocol::message`):
+
+- The authority emits `ReplicateCheckpoint` to each chosen holder; a holder stores
+  the newest checkpoint per (player, zone) in a `ReplicaStore` and `ReplicaStored`-acks
+  so the authority can confirm the replication factor is actually met.
+- **Every** participating node runs a `ReplicaStore`, even one that owns no zones —
+  including light/browser peers. Your backup is whoever is standing next to you.
+- On failover, the successor authority (next in the rendezvous ranking) broadcasts
+  `RequestReplicas`; surviving holders reply with `ReplicaBundle`s; the successor
+  imports the newest checkpoint per player (`arena_sim::World::import_player`) and
+  **rebuilds the zone losslessly**, then `Redirect`s those players to itself.
+
+This is the same proximity-replica trick spacegame uses ("a standby adopts the
+replicated sector snapshot"), generalized from per-sector snapshots to per-player
+checkpoints. It composes with §1's failover: rendezvous hashing picks *who* takes
+over; proximity replicas provide *what* state they take over with. The checkpoint
+payload is opaque to holders (`bincode` of a sim type), so holding a replica needs
+no game logic — and the same `import_player` primitive powers seamless hand-off.
+
 ---
 
 ## 2. Everything is hot-reloadable content (the keystone)

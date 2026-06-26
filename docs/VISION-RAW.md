@@ -59,6 +59,19 @@
 
 > document everything ive said, raw
 
+## 2026-06-26 — redundancy / proximity replication
+
+> We also need redundancy. Neighboring players closeby should also hold your state
+> for redundancy. this is what spacegame, another game with similar propblems does:
+
+(Leif then pasted a build log from spacegame's own session as the reference: a
+real-VM + mobile/WASM e2e harness that provisions 3 Hetzner VMs, hosts a galaxy
+sharded across them, and — the relevant part — "hard-kills VM A and asserts VM C
+adopts the replicated 0_0 snapshot and the sector resumes": proximity-replica
+fault-tolerance. spacegame keeps per-sector snapshots replicated to a standby/
+neighbors; Cerena generalizes this to per-player checkpoints held by the players
+physically nearest you.)
+
 ---
 
 ## Extracted pillars (a checklist, not a rewrite — the words above rule)
