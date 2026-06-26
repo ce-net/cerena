@@ -81,7 +81,6 @@ impl ArenaServer {
         // Everyone boots on the same default content at epoch 1; future packs hot-reload.
         let pack = default_pack();
         let epoch: u64 = 1;
-        let pack_hash = pack.hash();
 
         let manager = ZoneManager::new(node_id.clone(), config.session.clone(), pack.clone(), epoch);
         let anticheat = AntiCheat::new(node_id.clone(), pack.clone(), epoch);
@@ -92,7 +91,7 @@ impl ArenaServer {
                 config.e2e_insecure,
                 node_id.clone(),
                 epoch,
-                pack_hash,
+                pack.hash(),
             ))
         } else {
             None
