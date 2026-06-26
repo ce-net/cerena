@@ -22,15 +22,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use glam::Vec3;
-
-use arena_mesh::{assign_authority, Candidate, Envelope, MeshTransport, ZoneRouter};
+use arena_mesh::{Candidate, Envelope, MeshTransport, ZoneRouter};
 
 use arena_protocol::auth::SessionId;
 use arena_protocol::entity::EntityState;
 use arena_protocol::input::InputBatch;
 use arena_protocol::message::{topic, AuthorityMsg};
-use arena_protocol::world::{Team, ZoneId};
+use arena_protocol::world::ZoneId;
 use arena_protocol::NodeId;
 
 use arena_content::registry::ContentRegistry;
@@ -388,6 +386,9 @@ impl ZoneManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arena_mesh::assign_authority;
+    use arena_protocol::world::Team;
+    use glam::Vec3;
 
     #[test]
     fn should_own_matches_assign_authority() {
