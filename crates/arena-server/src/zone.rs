@@ -135,6 +135,20 @@ impl ZoneSim {
         self.players.contains_key(node)
     }
 
+    /// `(player node, current world position)` for every hosted client. Used by the manager
+    /// to detect zone-boundary crossings without exposing the private slot/world internals.
+    pub fn player_positions(&self) -> Vec<(NodeId, Vec3)> {
+        self.players
+            .iter()
+            .filter_map(|(node, slot)| {
+                self.world
+                    .entities()
+                    .get(&slot.entity)
+                    .map(|e| (node.clone(), e.pos))
+            })
+            .collect()
+    }
+
     /// Spawn a player for `node` on `team` and register a slot. Returns its entity id and
     /// the spawn point (read back from the freshly-spawned entity for the JoinAccept).
     pub fn add_player(&mut self, node: NodeId, team: Team) -> (EntityId, SpawnPoint) {
