@@ -1,0 +1,15 @@
+[package]
+name = "arena-procgen"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic procedural geometry (SDF/metaball + surface extraction, organic) + procedural textures + world generation. wasm-clean, no wgpu."
+
+[dependencies]
+arena-protocol = { path = "../arena-protocol" }
+arena-content = { path = "../arena-content" }
+glam.workspace = true
+serde.workspace = true
+noise.workspace = true
