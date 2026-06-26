@@ -144,6 +144,23 @@ impl ZoneManager {
         self.owned.get_mut(&zone)
     }
 
+    /// The node currently authoritative for `zone` under the live candidate set.
+    pub fn authority_for(&self, zone: ZoneId) -> Option<NodeId> {
+        self.router.authority_for(zone)
+    }
+
+    /// Every player node hosted across all owned zones (for the coordinator's karma pass).
+    pub fn all_player_nodes(&self) -> Vec<NodeId> {
+        self.owned.values().flat_map(|z| z.player_nodes()).collect()
+    }
+
+    /// Remove a player from whichever owned zone hosts them (graceful leave / kick). Returns
+    /// the player's carried state if they were hosted.
+    pub fn remove_player(&mut self, node: &NodeId) -> Option<(EntityState, u32)> {
+        let zid = self.zone_of_player(node)?;
+        self.owned.get_mut(&zid).and_then(|z| z.remove_player(node))
+    }
+
     /// Find the zone hosting `node` (a player is in at most one owned zone at a time).
     fn zone_of_player(&self, node: &NodeId) -> Option<ZoneId> {
         self.owned

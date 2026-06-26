@@ -130,6 +130,16 @@ impl ZoneSim {
         self.players.len()
     }
 
+    /// The current simulation tick.
+    pub fn current_tick(&self) -> Tick {
+        self.tick
+    }
+
+    /// The node ids of all hosted clients.
+    pub fn player_nodes(&self) -> Vec<NodeId> {
+        self.players.keys().cloned().collect()
+    }
+
     /// Whether a given node is hosted here.
     pub fn has_player(&self, node: &NodeId) -> bool {
         self.players.contains_key(node)

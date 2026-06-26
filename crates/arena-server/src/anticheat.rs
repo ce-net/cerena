@@ -34,7 +34,7 @@ use crate::zone::build_zone_geometry;
 
 /// Verifier sample size we assume per cross-validated tick. Drives the dispute quorum
 /// (a 2/3 supermajority must disagree); floored at [`arena_karma::crossval::MIN_VERIFIERS`].
-pub const VERIFIER_SAMPLE: usize = 5;
+pub const VERIFIER_SAMPLE: usize = 3;
 
 /// The per-node anti-cheat state.
 pub struct AntiCheat {
@@ -131,6 +131,14 @@ impl AntiCheat {
             agree,
             their_hash: our_hash,
         }
+    }
+
+    /// Record *our own* authority claim for a (zone, tick) so this node, acting as the tally
+    /// point, counts the verifier votes that arrive for it. Called when we publish a
+    /// [`VerifyTick`](AuthorityMsg::VerifyTick) for a zone we own.
+    pub fn record_own_claim(&mut self, zone: ZoneId, tick: Tick, hash: [u8; 32]) {
+        self.authorities.insert(self.node_id.clone());
+        self.crossval.record_claim(zone, tick, self.node_id.clone(), hash);
     }
 
     /// Compute the post-tick state hash of a shadow replay of `inputs` in `zone`. Exposed for
