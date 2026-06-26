@@ -150,6 +150,9 @@ async fn main() -> ExitCode {
         e2e_admin: args.e2e_admin,
         e2e_cheat: args.e2e_cheat,
         tick_hz: if args.tick_hz == 0 { arena_protocol::TICK_HZ } else { args.tick_hz },
+        // Proximity-replication defaults; not exposed as flags (sane fleet-wide values).
+        replication_factor: 3,
+        replication_interval_ticks: 64,
     };
 
     // Build the server (this is where an unreachable CE node fails with a clear message).

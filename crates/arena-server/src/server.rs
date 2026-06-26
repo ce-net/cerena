@@ -4,6 +4,8 @@
 //! producer tasks and then *becomes* the single tick-loop consumer that owns all
 //! simulation state. See the crate docs for the actor architecture this implements.
 
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -14,10 +16,10 @@ use arena_mesh::{Discovery, Envelope, MeshTransport};
 
 use arena_protocol::auth::SessionId;
 use arena_protocol::entity::{EntityFlags, EntityKind, EntityState};
-use arena_protocol::message::{topic, AuthorityMsg, ClientMsg, ServerMsg};
+use arena_protocol::message::{topic, AuthorityMsg, ClientMsg, PlayerCheckpoint, ServerMsg};
 use arena_protocol::weapon::default_loadout;
 use arena_protocol::world::{MapId, SpawnPoint, Team, ZoneId};
-use arena_protocol::{decode, NodeId, PROTOCOL_VERSION};
+use arena_protocol::{decode, NodeId, Tick, PROTOCOL_VERSION};
 
 use arena_content::default_pack;
 use arena_content::hotreload::ContentVersion;
@@ -28,6 +30,7 @@ use crate::config::ServerConfig;
 use crate::coordinator::{Coordinator, JoinDecision};
 use crate::handler::{ArenaHandler, Inbound};
 use crate::manager::{HandoffRequest, ZoneManager};
+use crate::replication::{ReplicaStore, ReplicationManager};
 
 /// How many inbound messages the producer→consumer channel buffers before producers block.
 /// Generous so a burst of input never stalls the mesh tasks; the tick loop drains it fast.
@@ -45,6 +48,11 @@ const DISCOVERY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Round-trip timeout for authority-to-authority RPC (hand-off / adopt).
 const AUTHORITY_RPC_TIMEOUT_MS: u64 = 4_000;
+
+/// How long (in ticks) a successor authority collects [`ReplicaBundle`](AuthorityMsg::ReplicaBundle)
+/// replies before rebuilding the zone from whatever arrived. Short — the holders are nearby and
+/// answer fast — so failover is near-instant.
+const RECOVERY_WINDOW_TICKS: u64 = arena_protocol::TICK_HZ as u64; // ~1 s
 
 /// The top-level server. Build with [`ArenaServer::new`], then [`ArenaServer::run`].
 pub struct ArenaServer {
@@ -258,6 +266,13 @@ impl ArenaServer {
 
         // The single consumer: the fixed-tick loop that owns all simulation state.
         let mut engine = Engine {
+            replica_store: ReplicaStore::new(),
+            replication: ReplicationManager::new(
+                config.replication_factor,
+                config.replication_interval_ticks,
+            ),
+            recoveries: HashMap::new(),
+            replication_subs: HashSet::new(),
             config: config.clone(),
             node_id,
             transport,
@@ -299,6 +314,15 @@ impl ArenaServer {
     }
 }
 
+/// In-flight failover recovery for one zone this node just claimed: it gathers replica
+/// bundles from surviving holders until `deadline_tick`, keeping the newest checkpoint per
+/// player, then rebuilds the zone from them.
+struct Recovery {
+    deadline_tick: u64,
+    /// Newest checkpoint seen per player across all bundles received so far.
+    best: HashMap<NodeId, PlayerCheckpoint>,
+}
+
 /// The tick-loop consumer's owned state. Lives on one task; never shared, never locked.
 struct Engine {
     config: ServerConfig,
@@ -307,7 +331,16 @@ struct Engine {
     manager: ZoneManager,
     coordinator: Option<Coordinator>,
     anticheat: AntiCheat,
-    /// Monotonic wall-clock tick counter driving the periodic crossval / karma passes.
+    /// Replicas this node holds *for others* — its role as a redundant backup. Every node runs
+    /// one, even if it owns no zones.
+    replica_store: ReplicaStore,
+    /// Authority-side proximity replication: holder selection, sequencing, coverage.
+    replication: ReplicationManager,
+    /// Zones currently being recovered after a failover claim, keyed by zone.
+    recoveries: HashMap<ZoneId, Recovery>,
+    /// Replication topics we have subscribed to (as a holder) so we hear failover gathers.
+    replication_subs: HashSet<ZoneId>,
+    /// Monotonic wall-clock tick counter driving the periodic crossval / karma / replication passes.
     global_tick: u64,
 }
 
@@ -323,9 +356,14 @@ impl Engine {
             }
             Inbound::Candidates(candidates) => {
                 self.manager.update_candidates(candidates);
-                // Ownership may have changed; reconcile and hand off any lost zones' players.
-                let handoffs = self.manager.reconcile_ownership(&self.transport).await;
+                // Ownership may have changed (e.g. a dead authority dropped out): reconcile,
+                // hand off any lost zones' players, and start failover recovery for zones we
+                // just took over.
+                let (handoffs, claimed) = self.manager.reconcile_ownership(&self.transport).await;
                 self.spawn_handoffs(handoffs);
+                for zone in claimed {
+                    self.start_recovery(zone).await;
+                }
             }
             Inbound::StageContent { epoch, pack } => {
                 tracing::info!(epoch, "staging hot-reloaded content");
@@ -523,6 +561,68 @@ impl Engine {
                 self.spawn_handoffs(handoffs);
             }
 
+            // Holder role: an authority asks us to redundantly hold player checkpoints. Store
+            // them (newest seq wins), subscribe to this zone's replication plane so we hear a
+            // future failover gather, and ack the highest seq held back to the authority.
+            Envelope::Authority(AuthorityMsg::ReplicateCheckpoint {
+                session,
+                zone,
+                authority,
+                checkpoints,
+                ..
+            }) => {
+                let now_tick = self.global_tick as Tick;
+                for ckpt in checkpoints {
+                    self.replica_store.store(zone, ckpt, authority.clone(), now_tick);
+                }
+                // Subscribe once per zone so the successor's RequestReplicas reaches us.
+                if self.replication_subs.insert(zone) {
+                    let topic_name = topic::replication(&session, zone);
+                    let _ = self.transport.subscribe(&topic_name).await;
+                }
+                // Ack coverage back to the issuing authority.
+                let ack = Envelope::Authority(AuthorityMsg::ReplicaStored {
+                    holder: self.node_id.clone(),
+                    zone,
+                    acked: self.replica_store.acks_for(zone),
+                });
+                let topic_name = topic::replication(&session, zone);
+                let _ = self.transport.send_envelope(&authority, &topic_name, &ack).await;
+            }
+
+            // Successor authority on failover wants every checkpoint we hold for a zone. Reply
+            // directly with our bundle (no reply token — RequestReplicas is a broadcast).
+            Envelope::Authority(AuthorityMsg::RequestReplicas { session, zone, requester }) => {
+                if requester == self.node_id {
+                    return; // our own broadcast echoed back
+                }
+                let checkpoints = self.replica_store.bundle_for(zone);
+                if checkpoints.is_empty() {
+                    return;
+                }
+                let bundle = Envelope::Authority(AuthorityMsg::ReplicaBundle {
+                    zone,
+                    holder: self.node_id.clone(),
+                    checkpoints,
+                });
+                let topic_name = topic::replication(&session, zone);
+                let _ = self.transport.send_envelope(&requester, &topic_name, &bundle).await;
+            }
+
+            // Authority role: a holder confirms how much of each player it durably holds —
+            // update coverage so we know the replication factor is met.
+            Envelope::Authority(AuthorityMsg::ReplicaStored { holder, acked, .. }) => {
+                for (player, seq) in acked {
+                    self.replication.record_ack(&player, &holder, seq);
+                }
+            }
+
+            // Recovery: a holder's bundle in answer to our gather — fold it into the open
+            // recovery for that zone (newest checkpoint per player).
+            Envelope::Authority(AuthorityMsg::ReplicaBundle { zone, checkpoints, .. }) => {
+                self.collect_bundle(zone, checkpoints);
+            }
+
             // Border mirrors are read-only neighbour state for cross-zone hitscan/rendering.
             // Applying them as ZoneMirror entities is a refinement; accepted + ignored for now.
             Envelope::Authority(AuthorityMsg::BorderMirror { .. }) => {}
@@ -547,6 +647,18 @@ impl Engine {
             .await;
         self.spawn_handoffs(handoffs);
 
+        // Proximity replication: periodically push each player's checkpoint to its nearest
+        // peers so a crash is lossless.
+        if self.replication.checkpoints_due(self.global_tick as Tick) {
+            self.emit_checkpoints().await;
+        }
+
+        // Finalize any failover recovery whose collection window has elapsed.
+        self.finalize_recoveries().await;
+
+        // Age out stale replicas we hold for others.
+        self.replica_store.evict_expired(self.global_tick as Tick);
+
         // Publish verify-ticks for our zones so peers can shadow-replay them.
         if self.global_tick % CROSSVAL_INTERVAL_TICKS == 0 {
             self.emit_verifications().await;
@@ -555,6 +667,135 @@ impl Engine {
         // Coordinator-only: fuse client suspicion + report pressure and resolve disputes.
         if self.coordinator.is_some() && self.global_tick % KARMA_INTERVAL_TICKS == 0 {
             self.karma_pass(now_unix()).await;
+        }
+    }
+
+    /// Producer side of proximity replication: for every player in every owned zone, ship a
+    /// fresh checkpoint to its K nearest peers. Directed sends (the holders are specific nodes),
+    /// fire-and-forget — a dropped checkpoint is replaced by the next round.
+    async fn emit_checkpoints(&mut self) {
+        let batches = self.manager.replication_batch();
+        for batch in batches {
+            let topic_name = topic::replication(&self.config.session, batch.zone);
+            for export in &batch.exports {
+                // Serialise the sim checkpoint into the opaque wire blob.
+                let blob = match bincode::serialize(&export.sim_ckpt) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(player = %export.player, error = %e, "checkpoint serialize failed");
+                        continue;
+                    }
+                };
+                let seq = self.replication.next_seq(&export.player);
+                let wire = PlayerCheckpoint {
+                    player: export.player.clone(),
+                    entity: export.entity,
+                    seq,
+                    tick: batch.tick,
+                    state: export.state.clone(),
+                    blob,
+                };
+                // The K nearest *other* players are this player's redundant backups.
+                let holders =
+                    self.replication
+                        .select_holders(&export.player, export.pos, &batch.players);
+                let env = Envelope::Authority(AuthorityMsg::ReplicateCheckpoint {
+                    session: self.config.session.clone(),
+                    zone: batch.zone,
+                    tick: batch.tick,
+                    authority: self.node_id.clone(),
+                    checkpoints: vec![wire.clone()],
+                });
+                for holder in holders {
+                    if let Err(e) = self.transport.send_envelope(&holder, &topic_name, &env).await {
+                        tracing::trace!(holder = %holder, error = %e, "checkpoint replicate send failed");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Begin failover recovery for a freshly-claimed zone: broadcast a replica-gather request
+    /// to the fleet and open a short collection window. Surviving holders answer with the
+    /// checkpoints they hold; [`finalize_recoveries`](Self::finalize_recoveries) rebuilds the
+    /// zone from the newest per player. This is the redundancy headline: no central standby —
+    /// the players who were standing next to the crashed authority's players ARE the backup.
+    async fn start_recovery(&mut self, zone: ZoneId) {
+        let topic_name = topic::replication(&self.config.session, zone);
+        // Subscribe so directed bundle replies and any cross-talk on this plane reach us.
+        if self.replication_subs.insert(zone) {
+            let _ = self.transport.subscribe(&topic_name).await;
+        }
+        let env = Envelope::Authority(AuthorityMsg::RequestReplicas {
+            session: self.config.session.clone(),
+            zone,
+            requester: self.node_id.clone(),
+        });
+        if let Err(e) = self.transport.publish_envelope(&topic_name, &env).await {
+            tracing::warn!(zone = %zone.token(), error = %e, "replica-gather broadcast failed");
+        }
+        self.recoveries.insert(
+            zone,
+            Recovery {
+                deadline_tick: self.global_tick + RECOVERY_WINDOW_TICKS,
+                best: HashMap::new(),
+            },
+        );
+        tracing::info!(zone = %zone.token(), "failover recovery started; gathering proximity replicas");
+    }
+
+    /// Fold an incoming replica bundle into any open recovery for its zone (newest per player).
+    fn collect_bundle(&mut self, zone: ZoneId, checkpoints: Vec<PlayerCheckpoint>) {
+        let Some(recovery) = self.recoveries.get_mut(&zone) else {
+            return; // not recovering this zone (late/duplicate bundle) — ignore
+        };
+        for ckpt in checkpoints {
+            let keep = recovery
+                .best
+                .get(&ckpt.player)
+                .map(|existing| ckpt.seq > existing.seq)
+                .unwrap_or(true);
+            if keep {
+                recovery.best.insert(ckpt.player.clone(), ckpt);
+            }
+        }
+    }
+
+    /// Complete any recovery whose window elapsed: import the newest checkpoint per player into
+    /// the rebuilt zone and redirect those players to this node. If no replicas arrived the zone
+    /// simply starts empty and players re-home via their own redirect/rejoin (the coarse fallback).
+    async fn finalize_recoveries(&mut self) {
+        let due: Vec<ZoneId> = self
+            .recoveries
+            .iter()
+            .filter(|(_, r)| self.global_tick >= r.deadline_tick)
+            .map(|(z, _)| *z)
+            .collect();
+
+        for zone in due {
+            let Some(recovery) = self.recoveries.remove(&zone) else { continue };
+            let count = recovery.best.len();
+            for (player, ckpt) in recovery.best {
+                // Decode the opaque sim checkpoint and import it, losslessly restoring the player.
+                let sim_ckpt: arena_sim::PlayerCheckpoint = match bincode::deserialize(&ckpt.blob) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(player = %player, error = %e, "replica blob decode failed; skipping");
+                        continue;
+                    }
+                };
+                let entity = self.manager.import_recovered(zone, player.clone(), sim_ckpt);
+                // Re-home the recovered player's client to us as the new authority.
+                let redirect = Envelope::Server(ServerMsg::Redirect {
+                    zone,
+                    authority: self.node_id.clone(),
+                    entity,
+                    tick: 0,
+                });
+                let client_topic = topic::zone_state(&self.config.session, zone);
+                let _ = self.transport.send_envelope(&player, &client_topic, &redirect).await;
+            }
+            tracing::info!(zone = %zone.token(), restored = count, "failover recovery complete");
         }
     }
 
