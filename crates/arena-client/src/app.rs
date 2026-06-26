@@ -329,13 +329,22 @@ impl App {
 fn make_client_world(local_id: EntityId, map: &arena_sim::MapDef) -> ClientWorld<ReplaySim> {
     let map_for_rebuild = map.clone();
     let rebuild: RebuildFn = Box::new(move |auth: &EntityState| {
-        let mut world = arena_sim::World::new(map_for_rebuild.clone());
+        // The prediction sim needs the same content (movement tunables, spells) as
+        // the authority. We build a fresh registry from the default pack here; a
+        // follow-up should thread the *current* hot-reloaded pack/epoch in so the
+        // predicted feel tracks live tweaks exactly. Prediction error self-corrects
+        // via reconciliation regardless, so a stale pack only affects feel briefly.
+        let content = ContentRegistry::new(1, arena_content::default_pack())
+            .unwrap_or_else(|_| ContentRegistry::bootstrap());
+        let mut world = arena_sim::World::new(map_for_rebuild.clone(), content);
         // TODO(arena-sim): replace with `world.seed_player(auth.id, auth)` so the
         // local entity exists at exactly `auth`. Until then we best-effort spawn.
         let _ = world.spawn_player(auth.owner.clone(), auth.team);
         world
     });
-    let initial = arena_sim::World::new(map.clone());
+    let initial_content = ContentRegistry::new(1, arena_content::default_pack())
+        .unwrap_or_else(|_| ContentRegistry::bootstrap());
+    let initial = arena_sim::World::new(map.clone(), initial_content);
     ClientWorld::new(local_id, SimReplay::new(initial, rebuild))
 }
 

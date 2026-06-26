@@ -36,6 +36,29 @@
 > everyone goes from novice to experts. Document these ideas somwhere raw exactly as
 > i put them - dont fuck with my ideas.
 
+## 2026-06-26 — e2e at scale
+
+> Write e2e tests which tests and verifies its deployment on real vms at scale and
+> how good its fault tolerance is
+
+## 2026-06-26 — backend, more systems
+
+> Continue writing backend only now. add more features. hot reloadable gameplay,
+> shaders, spells, tech trees, systems.
+
+## 2026-06-26 — naming (1)
+
+> Dont call this game "ce-arena". waht do we call it on the website? the 1000 player
+> fps? call it that. rename gitrepo and folder
+
+## 2026-06-26 — naming (2)
+
+> Alright skirmish is a bad name call it cerena instead.
+
+## 2026-06-26 — documentation
+
+> document everything ive said, raw
+
 ---
 
 ## Extracted pillars (a checklist, not a rewrite — the words above rule)
