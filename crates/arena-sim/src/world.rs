@@ -704,8 +704,8 @@ impl World {
                 };
                 if slam {
                     if let Some(def) = modes.iter().find(|m| matches!(m.kind, MovementKind::GroundSlam { .. })) {
-                        if let MovementKind::GroundSlam { damage, radius, .. } = def.kind {
-                            self.ground_slam_burst(*id, damage, radius, events);
+                        if let MovementKind::GroundSlam { damage, radius, .. } = &def.kind {
+                            self.ground_slam_burst(*id, *damage, *radius, events);
                         }
                     }
                 }

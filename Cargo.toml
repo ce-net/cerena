@@ -11,6 +11,7 @@ members = [
     "crates/arena-mesh",
     "crates/arena-client",
     "crates/arena-server-bin",
+    "crates/cerena-e2e",
 ]
 
 # arena-client targets wasm32 + native; keep it out of the default `cargo build`
@@ -25,6 +26,7 @@ default-members = [
     "crates/arena-karma",
     "crates/arena-mesh",
     "crates/arena-server-bin",
+    "crates/cerena-e2e",
 ]
 
 # Shared noise dep for procedural generation (organic SDF fields, textures, worldgen).
