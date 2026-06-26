@@ -357,6 +357,7 @@ fn build_window(event_loop: &EventLoop<()>) -> Arc<Window> {
     }
     #[cfg(target_arch = "wasm32")]
     {
+        use wasm_bindgen::JsCast;
         use winit::platform::web::WindowBuilderExtWebSys;
 
         // Create (or reuse) a canvas in the DOM and hand it to winit.

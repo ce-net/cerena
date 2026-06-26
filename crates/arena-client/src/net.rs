@@ -41,6 +41,9 @@ fn encode_client(msg: ClientMsg) -> Option<Vec<u8>> {
 
 /// Decode a wire frame into a [`ServerMsg`], dropping anything that is not a
 /// server-directed envelope (the client never processes client/authority frames).
+/// (Only exercised by the wasm WebSocket transport today; the native stub injects
+/// already-decoded messages.)
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn decode_server(bytes: &[u8]) -> Option<ServerMsg> {
     match arena_protocol::decode::<Envelope>(bytes) {
         Ok(Envelope::Server(msg)) => Some(msg),

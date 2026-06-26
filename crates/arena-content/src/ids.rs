@@ -54,3 +54,7 @@ content_id!(ShaderId, "A WGSL shader program (hot-recompilable).");
 content_id!(MobId, "A non-player creature / summon archetype.");
 content_id!(MissionId, "A procedural objective.");
 content_id!(ElementId, "A magic element (fire, frost, void, life, ...). Data-driven.");
+content_id!(GameModeId, "A set of gameplay rules (win/scoring/teams). Hot-swappable live.");
+content_id!(TriggerId, "A data-driven event->action rule (the designer's scripting unit).");
+content_id!(LootTableId, "A named, weighted loot table rolled on kills/missions/death.");
+content_id!(SpawnRuleId, "A data-driven world spawn rule (what populates the open world).");

@@ -229,7 +229,7 @@ fn eval_inner(
         }
         EffectOp::Heal { amount } => {
             let who = target_entity(ctx, target).unwrap_or(ctx.caster);
-            world.heal_entity(who, amount * ctx.damage_mult, events);
+            world.heal_entity(who, amount * ctx.damage_mult);
         }
         EffectOp::Shield { amount, duration_s } => {
             let who = target_entity(ctx, target).unwrap_or(ctx.caster);
@@ -237,7 +237,7 @@ fn eval_inner(
         }
         EffectOp::ApplyStatus { status, duration_s, stacks } => {
             if let Some(victim) = target_entity(ctx, target) {
-                world.apply_status_to(victim, status, *duration_s, *stacks, ctx.tick);
+                world.apply_status_to(victim, status, *duration_s, *stacks, ctx.tick, ctx.caster);
             }
         }
         EffectOp::Impulse { force, vertical_bias } => {
@@ -252,7 +252,7 @@ fn eval_inner(
             } else {
                 ctx.dir
             };
-            world.teleport_entity(ctx.caster, dir, *max_distance, events);
+            world.teleport_entity(ctx.caster, dir, *max_distance);
         }
         EffectOp::Summon { mob, count, duration_s } => {
             summon(world, ctx, mob, *count, *duration_s, events);
