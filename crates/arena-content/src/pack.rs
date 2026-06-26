@@ -10,14 +10,19 @@ use sha2::{Digest, Sha256};
 use crate::{
     ContentError,
     ability::AbilityDef,
+    gamemode::GameModeDef,
     item::ItemDef,
+    loot::LootTableDef,
     material::{MaterialDef, ShaderDef},
     mission::MissionDef,
     mob::MobDef,
     movement::MovementModeDef,
+    spawn::SpawnRuleDef,
     spell::SpellDef,
     status::StatusEffectDef,
     tech::TechTree,
+    triggers::{GameTrigger, RuleAction, TriggerCondition, TriggerDef},
+    tuning::TuningConfig,
     worldgen::WorldGenParams,
 };
 
@@ -39,6 +44,17 @@ pub struct ContentPack {
     pub worldgen: WorldGenParams,
     pub mobs: Vec<MobDef>,
     pub missions: Vec<MissionDef>,
+    /// Global balance numbers (gravity, speeds, regen, XP curve, loot fractions...).
+    /// All gameplay magic-numbers live here so they hot-reload (see [`TuningConfig`]).
+    pub tuning: TuningConfig,
+    /// Match rule-sets (win/scoring/teams/loadout). Switching the active mode is live.
+    pub game_modes: Vec<GameModeDef>,
+    /// Named weighted drop pools referenced by mobs, missions, and death-drops.
+    pub loot_tables: Vec<LootTableDef>,
+    /// Data-driven rules for populating the open world with creatures.
+    pub spawn_rules: Vec<SpawnRuleDef>,
+    /// Data-driven event->action rules: the designer's scripting layer.
+    pub triggers: Vec<TriggerDef>,
 }
 
 impl ContentPack {
@@ -80,6 +96,10 @@ impl ContentPack {
         let spell_ids: HashSet<_> = self.spells.iter().map(|s| s.id.clone()).collect();
         let item_ids: HashSet<_> = self.items.iter().map(|i| i.id.clone()).collect();
         let status_ids: HashSet<_> = self.statuses.iter().map(|s| s.id.clone()).collect();
+        let ability_ids: HashSet<_> = self.abilities.iter().map(|a| a.id.clone()).collect();
+        let mob_ids: HashSet<_> = self.mobs.iter().map(|m| m.id.clone()).collect();
+        let tech_ids: HashSet<_> = self.tech.nodes.iter().map(|n| n.id.clone()).collect();
+        let loot_table_ids: HashSet<_> = self.loot_tables.iter().map(|t| t.id.clone()).collect();
 
         for a in &self.abilities {
             if !spell_ids.contains(&a.spell) {
@@ -103,6 +123,125 @@ impl ContentPack {
         for s in &self.spells {
             check_status_refs(&s.root, &status_ids, &s.id.0)?;
         }
+
+        // Game modes: starting loadouts and items must resolve.
+        for m in &self.game_modes {
+            for ab in &m.starting_loadout {
+                if !ability_ids.contains(ab) {
+                    return Err(ContentError::Invalid(format!(
+                        "game mode {} starting_loadout references missing ability {ab}",
+                        m.id
+                    )));
+                }
+            }
+            for (it, _) in &m.starting_items {
+                if !item_ids.contains(it) {
+                    return Err(ContentError::Invalid(format!(
+                        "game mode {} starting_items references missing item {it}",
+                        m.id
+                    )));
+                }
+            }
+        }
+
+        // Loot tables: every entry's item must exist.
+        for t in &self.loot_tables {
+            for e in &t.entries {
+                if !item_ids.contains(&e.item) {
+                    return Err(ContentError::Invalid(format!(
+                        "loot table {} references missing item {}",
+                        t.id, e.item
+                    )));
+                }
+            }
+        }
+
+        // Spawn rules: the mob and any loot-table override must resolve.
+        for r in &self.spawn_rules {
+            if !mob_ids.contains(&r.mob) {
+                return Err(ContentError::Invalid(format!(
+                    "spawn rule {} references missing mob {}",
+                    r.id, r.mob
+                )));
+            }
+            if let Some(lt) = &r.loot_table {
+                if !loot_table_ids.contains(lt) {
+                    return Err(ContentError::Invalid(format!(
+                        "spawn rule {} references missing loot table {lt}",
+                        r.id
+                    )));
+                }
+            }
+        }
+
+        // Triggers: every id named by an event, condition, or action must resolve.
+        for tr in &self.triggers {
+            match &tr.on {
+                GameTrigger::OnPickup { item } => {
+                    if !item_ids.contains(item) {
+                        return Err(ContentError::Invalid(format!(
+                            "trigger {} fires on pickup of missing item {item}",
+                            tr.id
+                        )));
+                    }
+                }
+                GameTrigger::OnSpellCast { spell } => {
+                    if !spell_ids.contains(spell) {
+                        return Err(ContentError::Invalid(format!(
+                            "trigger {} fires on cast of missing spell {spell}",
+                            tr.id
+                        )));
+                    }
+                }
+                _ => {}
+            }
+            for c in &tr.conditions {
+                match c {
+                    TriggerCondition::HasItem { item } if !item_ids.contains(item) => {
+                        return Err(ContentError::Invalid(format!(
+                            "trigger {} condition references missing item {item}",
+                            tr.id
+                        )));
+                    }
+                    TriggerCondition::HasTech { node } if !tech_ids.contains(node) => {
+                        return Err(ContentError::Invalid(format!(
+                            "trigger {} condition references missing tech node {node}",
+                            tr.id
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+            for a in &tr.actions {
+                match a {
+                    RuleAction::GrantItem { item, .. } if !item_ids.contains(item) => {
+                        return Err(ContentError::Invalid(format!(
+                            "trigger {} action grants missing item {item}",
+                            tr.id
+                        )));
+                    }
+                    RuleAction::ApplyStatus { status, .. } if !status_ids.contains(status) => {
+                        return Err(ContentError::Invalid(format!(
+                            "trigger {} action applies missing status {status}",
+                            tr.id
+                        )));
+                    }
+                    RuleAction::SpawnMob { mob, .. } if !mob_ids.contains(mob) => {
+                        return Err(ContentError::Invalid(format!(
+                            "trigger {} action spawns missing mob {mob}",
+                            tr.id
+                        )));
+                    }
+                    RuleAction::SpawnLoot { table } if !loot_table_ids.contains(table) => {
+                        return Err(ContentError::Invalid(format!(
+                            "trigger {} action rolls missing loot table {table}",
+                            tr.id
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        }
         Ok(())
     }
 
@@ -121,6 +260,11 @@ impl ContentPack {
             worldgen: WorldGenParams::default(),
             mobs: vec![],
             missions: vec![],
+            tuning: TuningConfig::default(),
+            game_modes: vec![],
+            loot_tables: vec![],
+            spawn_rules: vec![],
+            triggers: vec![],
         }
     }
 }

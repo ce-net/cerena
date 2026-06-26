@@ -88,7 +88,7 @@ impl Mesh {
 
         // Build a neighbour adjacency list from the triangle edges.
         let mut neighbours: Vec<Vec<u32>> = vec![Vec::new(); self.positions.len()];
-        let mut add = |a: u32, b: u32, nb: &mut Vec<Vec<u32>>| {
+        let add = |a: u32, b: u32, nb: &mut Vec<Vec<u32>>| {
             if !nb[a as usize].contains(&b) {
                 nb[a as usize].push(b);
             }
@@ -257,7 +257,7 @@ pub fn surface_nets(field: &dyn Fn(Vec3) -> f32, bounds: Aabb, res: usize, iso: 
     // Pass 2: stitch quads. For each minimal grid edge (the edge at a cell's base
     // corner along +X / +Y / +Z) that the surface crosses, the four cells sharing that
     // edge each own a vertex; join them into a quad. This is the dual of the crossing.
-    let mut push_quad = |mesh: &mut Mesh, v: [u32; 4], flip: bool| {
+    let push_quad = |mesh: &mut Mesh, v: [u32; 4], flip: bool| {
         // Two triangles around the loop v0-v1-v2-v3. `flip` orients by which side is
         // inside so front faces point outward.
         if flip {

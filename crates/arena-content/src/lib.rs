@@ -27,8 +27,10 @@
 
 pub mod ability;
 pub mod default_pack;
+pub mod gamemode;
 pub mod ids;
 pub mod item;
+pub mod loot;
 pub mod material;
 pub mod mission;
 pub mod mob;
@@ -36,15 +38,25 @@ pub mod movement;
 pub mod pack;
 pub mod registry;
 pub mod hotreload;
+pub mod spawn;
 pub mod spell;
 pub mod status;
 pub mod tech;
+pub mod triggers;
+pub mod tuning;
 pub mod worldgen;
 
 pub use default_pack::default_pack;
+pub use gamemode::{GameModeDef, ScoringRule, TeamConfig, WinCondition};
 pub use ids::*;
+pub use loot::{LootEntry, LootTableDef};
 pub use pack::ContentPack;
 pub use registry::ContentRegistry;
+pub use spawn::{SpawnRuleDef, SpawnTrigger};
+pub use triggers::{
+    GameTrigger, GameTriggerKind, RuleAction, TriggerCondition, TriggerDef,
+};
+pub use tuning::TuningConfig;
 
 /// Errors raised while loading or swapping content.
 #[derive(Debug, thiserror::Error)]

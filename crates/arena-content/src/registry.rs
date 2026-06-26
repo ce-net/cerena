@@ -10,13 +10,20 @@ use std::collections::HashMap;
 use crate::{
     ContentError,
     ability::AbilityDef,
-    ids::{AbilityId, ItemId, MaterialId, MobId, ShaderId, SpellId, StatusId},
+    gamemode::GameModeDef,
+    ids::{
+        AbilityId, GameModeId, ItemId, LootTableId, MaterialId, MobId, ShaderId, SpawnRuleId,
+        SpellId, StatusId, TriggerId,
+    },
     item::ItemDef,
+    loot::LootTableDef,
     material::{MaterialDef, ShaderDef},
     mob::MobDef,
     pack::ContentPack,
+    spawn::SpawnRuleDef,
     spell::SpellDef,
     status::StatusEffectDef,
+    triggers::{GameTriggerKind, TriggerDef},
 };
 
 /// Indexed, read-optimized content. Rebuilt from a [`ContentPack`] on every swap.
@@ -33,6 +40,10 @@ pub struct ContentRegistry {
     mobs: HashMap<MobId, usize>,
     materials: HashMap<MaterialId, usize>,
     shaders: HashMap<ShaderId, usize>,
+    game_modes: HashMap<GameModeId, usize>,
+    loot_tables: HashMap<LootTableId, usize>,
+    spawn_rules: HashMap<SpawnRuleId, usize>,
+    triggers: HashMap<TriggerId, usize>,
     /// A pack staged for the next tick-boundary swap, with its target epoch.
     pending: Option<(u64, ContentPack)>,
 }
@@ -53,6 +64,10 @@ impl ContentRegistry {
             mobs: HashMap::new(),
             materials: HashMap::new(),
             shaders: HashMap::new(),
+            game_modes: HashMap::new(),
+            loot_tables: HashMap::new(),
+            spawn_rules: HashMap::new(),
+            triggers: HashMap::new(),
             pending: None,
         };
         r.reindex(pack);
@@ -73,6 +88,10 @@ impl ContentRegistry {
         self.mobs = pack.mobs.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
         self.materials = pack.materials.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
         self.shaders = pack.shaders.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
+        self.game_modes = pack.game_modes.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
+        self.loot_tables = pack.loot_tables.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
+        self.spawn_rules = pack.spawn_rules.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
+        self.triggers = pack.triggers.iter().enumerate().map(|(i, d)| (d.id.clone(), i)).collect();
         self.active_hash = pack.hash();
         self.pack = pack;
     }
@@ -132,6 +151,46 @@ impl ContentRegistry {
     }
     pub fn shader(&self, id: &ShaderId) -> Option<&ShaderDef> {
         self.shaders.get(id).map(|&i| &self.pack.shaders[i])
+    }
+    pub fn game_mode(&self, id: &GameModeId) -> Option<&GameModeDef> {
+        self.game_modes.get(id).map(|&i| &self.pack.game_modes[i])
+    }
+    pub fn loot_table(&self, id: &LootTableId) -> Option<&LootTableDef> {
+        self.loot_tables.get(id).map(|&i| &self.pack.loot_tables[i])
+    }
+    pub fn spawn_rule(&self, id: &SpawnRuleId) -> Option<&SpawnRuleDef> {
+        self.spawn_rules.get(id).map(|&i| &self.pack.spawn_rules[i])
+    }
+    pub fn trigger(&self, id: &TriggerId) -> Option<&TriggerDef> {
+        self.triggers.get(id).map(|&i| &self.pack.triggers[i])
+    }
+
+    /// The global balance numbers for this epoch. The sim should read movement,
+    /// vitals, XP-curve, and loot constants from here rather than hardcoding them.
+    pub fn tuning(&self) -> &crate::tuning::TuningConfig {
+        &self.pack.tuning
+    }
+
+    /// Every trigger whose event matches `kind`. The sim's tick loop calls this when
+    /// an event fires (e.g. `triggers_for(GameTriggerKind::Kill)` on a kill) and then
+    /// checks each returned trigger's conditions before applying its actions. Returns
+    /// them in pack order so firing is deterministic across nodes.
+    pub fn triggers_for(&self, kind: GameTriggerKind) -> Vec<&TriggerDef> {
+        self.pack
+            .triggers
+            .iter()
+            .filter(|t| t.on.kind() == kind)
+            .collect()
+    }
+
+    /// All spawn rules (the authority iterates these to populate the world).
+    pub fn spawn_rules(&self) -> &[SpawnRuleDef] {
+        &self.pack.spawn_rules
+    }
+
+    /// All game modes (the lobby/coordinator picks the active one by id).
+    pub fn game_modes(&self) -> &[GameModeDef] {
+        &self.pack.game_modes
     }
 
     /// The whole active pack (for the client to (re)generate procedural assets and

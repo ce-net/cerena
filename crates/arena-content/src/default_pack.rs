@@ -14,16 +14,21 @@
 //! are append-only by convention — re-tuning is fine, renaming breaks saved state.
 
 use crate::ability::{AbilityDef, CastInput};
+use crate::gamemode::{GameModeDef, ScoringRule, TeamConfig, WinCondition};
 use crate::ids::*;
 use crate::item::{CraftRecipe, EquipSlot, ItemDef, Rarity, StatMods};
+use crate::loot::{LootEntry, LootTableDef};
 use crate::material::{ColorRamp, MaterialDef, NoiseKind, NoiseLayer, ShaderDef, ShaderStage};
 use crate::mission::{MissionDef, Objective};
 use crate::mob::MobDef;
 use crate::movement::{MovementKind, MovementModeDef};
 use crate::pack::ContentPack;
+use crate::spawn::{SpawnRuleDef, SpawnTrigger};
 use crate::spell::{EffectOp, Faction, Scaling, SpellDef};
 use crate::status::{StatusEffectDef, StatusKind};
 use crate::tech::{TechEffect, TechNode, TechTree};
+use crate::triggers::{GameTrigger, RuleAction, TriggerCondition, TriggerDef};
+use crate::tuning::TuningConfig;
 use crate::worldgen::WorldGenParams;
 
 /// Convenience: box an op for the tree-shaped `EffectOp` continuations.
@@ -65,7 +70,7 @@ fn spell(
 /// Build the full default content pack.
 pub fn default_pack() -> ContentPack {
     ContentPack {
-        label: "cerena-default-0.1".to_string(),
+        label: "cerena-default-0.2".to_string(),
         spells: spells(),
         items: items(),
         abilities: abilities(),
@@ -77,6 +82,11 @@ pub fn default_pack() -> ContentPack {
         worldgen: WorldGenParams::default(),
         mobs: mobs(),
         missions: missions(),
+        tuning: TuningConfig::default(),
+        game_modes: game_modes(),
+        loot_tables: loot_tables(),
+        spawn_rules: spawn_rules(),
+        triggers: triggers(),
     }
 }
 

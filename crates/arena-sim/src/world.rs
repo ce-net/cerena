@@ -1433,19 +1433,20 @@ impl World {
 
     /// Drain a target's shield to absorb `dmg`; returns the remaining damage.
     fn absorb_shield(&mut self, id: EntityId, dmg: f32) -> f32 {
+        let mut remaining = dmg;
+        let mut clear = false;
         if let Some((amount, _)) = self.shields.get_mut(&id) {
             if *amount > 0.0 {
-                let absorbed = amount.min(&mut { dmg }).clone(); // see note below
                 let take = dmg.min(*amount);
                 *amount -= take;
-                let _ = absorbed;
-                if *amount <= 0.0 {
-                    self.shields.remove(&id);
-                }
-                return (dmg - take).max(0.0);
+                remaining = (dmg - take).max(0.0);
+                clear = *amount <= 0.0;
             }
         }
-        dmg
+        if clear {
+            self.shields.remove(&id);
+        }
+        remaining
     }
 
     pub fn apply_status_to(
