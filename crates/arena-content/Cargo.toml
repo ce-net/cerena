@@ -1,0 +1,17 @@
+[package]
+name = "arena-content"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hot-reloadable game data: spell VM, items, tech tree, abilities, movement modes, materials/shaders, worldgen params; content packs + registry + hot-reload protocol."
+
+[dependencies]
+arena-protocol = { path = "../arena-protocol" }
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

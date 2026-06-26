@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/arena-protocol",
+    "crates/arena-content",
+    "crates/arena-procgen",
     "crates/arena-sim",
     "crates/arena-net",
     "crates/arena-server",
@@ -15,6 +17,8 @@ members = [
 # unless explicitly selected so a server build never drags wgpu in.
 default-members = [
     "crates/arena-protocol",
+    "crates/arena-content",
+    "crates/arena-procgen",
     "crates/arena-sim",
     "crates/arena-net",
     "crates/arena-server",
@@ -22,6 +26,10 @@ default-members = [
     "crates/arena-mesh",
     "crates/arena-server-bin",
 ]
+
+# Shared noise dep for procedural generation (organic SDF fields, textures, worldgen).
+[workspace.dependencies.noise]
+version = "0.9"
 
 [workspace.package]
 edition = "2024"

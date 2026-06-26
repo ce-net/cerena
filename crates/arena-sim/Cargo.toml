@@ -9,6 +9,7 @@ description = "Deterministic fixed-timestep FPS simulation: movement, collision,
 
 [dependencies]
 arena-protocol = { path = "../arena-protocol" }
+arena-content = { path = "../arena-content" }
 glam.workspace = true
 serde.workspace = true
 tracing.workspace = true

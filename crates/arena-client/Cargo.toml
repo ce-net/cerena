@@ -12,6 +12,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 arena-protocol = { path = "../arena-protocol" }
+arena-content = { path = "../arena-content" }
+arena-procgen = { path = "../arena-procgen" }
 arena-sim = { path = "../arena-sim" }
 arena-net = { path = "../arena-net" }
 glam.workspace = true
