@@ -364,3 +364,60 @@ fn ray_sphere(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<f32>
     let t = -b - disc.sqrt();
     Some(t.max(0.0)) // clamp to 0 if the origin is inside the sphere
 }
+
+/// A near-vertical wall the capsule is touching (within a small skin), if any. Used
+/// by parkour modes (wall-run, climb) that key off a horizontal contact normal.
+/// Returns an outward, mostly-horizontal normal.
+pub fn wall_contact(
+    pos: Vec3,
+    half_height: f32,
+    radius: f32,
+    brushes: &[Aabb],
+) -> Option<Vec3> {
+    // Probe with a slightly fattened capsule so a wall we are sliding along still
+    // registers even when the base capsule is just shy of touching it.
+    let probe = radius + 0.15;
+    let mut best: Option<Vec3> = None;
+    for b in brushes {
+        if let Some((n, _depth)) = capsule_aabb_penetration(pos, half_height, probe, b) {
+            if n.y.abs() < 0.5 {
+                // Prefer the most horizontal normal we find.
+                if best.map_or(true, |bn: Vec3| n.y.abs() < bn.y.abs()) {
+                    best = Some(n);
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Translate a capsule by `delta`, stopping at the first blocking geometry. Used by
+/// instantaneous moves (blink, teleport, dash positioning) that should not phase
+/// through walls. Returns the furthest unobstructed position along `delta`.
+pub fn clamp_translation(
+    pos: Vec3,
+    delta: Vec3,
+    half_height: f32,
+    radius: f32,
+    brushes: &[Aabb],
+) -> Vec3 {
+    let dist = delta.length();
+    if dist < 1e-6 {
+        return pos;
+    }
+    // Step in increments of half the radius so we cannot skip a thin wall.
+    let steps = (dist / (radius * 0.5)).ceil().max(1.0) as u32;
+    let step = delta / steps as f32;
+    let mut p = pos;
+    for _ in 0..steps {
+        let next = p + step;
+        let blocked = brushes
+            .iter()
+            .any(|b| capsule_aabb_penetration(next, half_height, radius, b).is_some());
+        if blocked {
+            break;
+        }
+        p = next;
+    }
+    p
+}

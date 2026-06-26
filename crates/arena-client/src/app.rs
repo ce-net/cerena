@@ -1,0 +1,506 @@
+//! The application: the event loop and the per-frame orchestration.
+//!
+//! This is where the netcode, prediction, rendering, input and hot-reload meet.
+//! It runs the same logic on native (a winit window driven by `EventLoop::run`) and
+//! in the browser (the same handler driven from `requestAnimationFrame` via
+//! `EventLoopExtWebSys::spawn`); only window/transport construction differs.
+//!
+//! ## The loop, precisely
+//!
+//! Rendering happens every animation frame (`RedrawRequested`); simulation input is
+//! produced on a **fixed-tick accumulator** at [`arena_protocol::TICK_HZ`] so
+//! prediction matches the server's fixed step exactly. Each frame:
+//!
+//! 1. **pump the network** — drain [`ServerMsg`]s and apply them: `JoinAccept`
+//!    seeds the local entity id + sim, `Snapshot` feeds [`ClientWorld::apply_snapshot`]
+//!    (whose drained [`GameEvent`]s spawn particles and update the HUD), `Redirect`
+//!    re-homes us to a new authority, `Pong` feeds clock sync, `Karma`/`Kick` adjust
+//!    session state;
+//! 2. **step input** — for every elapsed fixed tick, sample [`Input`] into one
+//!    [`InputFrame`], push it into the predictor ([`ClientWorld::push_input`], applied
+//!    immediately so movement is instant), and periodically ship an [`InputBatch`];
+//! 3. **update the camera** — snap it onto the predicted local player (position) and
+//!    the live look angles (so aim is smooth at render rate, not tick rate);
+//! 4. **render** — interpolated remotes + the predicted local, then VFX + HUD.
+//!
+//! Content swaps are applied at the top of the frame (a safe boundary) via
+//! [`HotReload::apply`], recompiling shaders and rebaking materials live.
+
+use std::sync::Arc;
+
+use winit::event::{DeviceEvent, ElementState, Event, KeyEvent, WindowEvent};
+use winit::event_loop::EventLoop;
+use winit::keyboard::PhysicalKey;
+use winit::window::Window;
+
+use arena_content::ContentRegistry;
+use arena_content::hotreload::ContentVersion;
+use arena_content::pack::ContentPack;
+use arena_net::{ClientWorld, SimReplay};
+use arena_protocol::entity::EntityState;
+use arena_protocol::input::InputFrame;
+use arena_protocol::message::{ClientMsg, ServerMsg};
+use arena_protocol::{EntityId, NodeId, TICK_DT};
+
+use crate::camera::Camera;
+use crate::gpu::Gpu;
+use crate::hotreload::HotReload;
+use crate::hud::HudState;
+use crate::input::Input;
+use crate::net::NetClient;
+use crate::particles::ParticleSystem;
+use crate::render::Renderer;
+
+/// Closure that rebuilds a single-player replay world seeded at an authoritative
+/// state. Boxed so the [`App`] is a concrete (non-generic) type; `Box<dyn Fn>`
+/// satisfies the [`SimReplay`] `Fn` bound.
+type RebuildFn = Box<dyn Fn(&EntityState) -> arena_sim::World>;
+
+/// The concrete replay sim and client-world types this client uses.
+type ReplaySim = SimReplay<RebuildFn>;
+type Net = Box<dyn NetClient>;
+
+/// Send an input batch this often (in ticks). Matching the snapshot cadence
+/// (~20 Hz) keeps upstream bandwidth modest while re-sending unacked frames in each
+/// batch makes a single dropped packet harmless.
+const INPUT_SEND_EVERY_TICKS: u32 = arena_protocol::TICKS_PER_SNAPSHOT;
+
+/// Send a liveness/clock ping this often, in milliseconds.
+const PING_INTERVAL_MS: u64 = 1000;
+
+/// Never advance more than this many fixed ticks in one frame, so a long stall (tab
+/// backgrounded, GC pause) cannot trigger a death-spiral of catch-up simulation.
+const MAX_CATCHUP_TICKS: u32 = 8;
+
+/// The whole client.
+pub struct App {
+    renderer: Renderer,
+    camera: Camera,
+    input: Input,
+    hud: HudState,
+    particles: ParticleSystem,
+
+    /// Live content + the hot-reload driver.
+    registry: ContentRegistry,
+    hotreload: HotReload,
+
+    /// The network transport (browser WebSocket / native stub).
+    net: Net,
+
+    /// The predicted+interpolated world. Rebuilt on join/redirect with the assigned
+    /// local entity id.
+    cw: ClientWorld<ReplaySim>,
+    /// Our CE node id (identity) and our per-zone entity id once joined.
+    local_node: NodeId,
+    local_id: EntityId,
+    joined: bool,
+    /// The static collision map driving local prediction. A placeholder test arena
+    /// until the real content-addressed [`arena_sim::MapDef`] is fetched on join.
+    map: arena_sim::MapDef,
+
+    // --- timing ---
+    last_ms: u64,
+    /// Fixed-tick accumulator, seconds.
+    accumulator: f32,
+    tick_counter: u32,
+    last_ping_ms: u64,
+}
+
+impl App {
+    /// Build and run the client: window + gpu bring-up, then the event loop.
+    /// Async because gpu setup awaits; the loop itself is synchronous.
+    pub async fn run() {
+        let event_loop = EventLoop::new().expect("create event loop");
+        let window = build_window(&event_loop);
+        let gpu = Gpu::new(window.clone()).await;
+        let app = App::new(gpu);
+        run_event_loop(event_loop, window, app);
+    }
+
+    /// Assemble the client around an initialised [`Gpu`].
+    fn new(gpu: Gpu) -> App {
+        let renderer = Renderer::new(gpu);
+
+        // Start with an empty content registry; the real pack is fetched on the
+        // first ContentVersion. The map is the bundled test arena until join.
+        let registry = ContentRegistry::bootstrap();
+        let map = arena_sim::MapDef::test_arena();
+
+        // A placeholder local id (0) until JoinAccept assigns the real one. The
+        // predictor stays dormant (renders nothing for the local player) until the
+        // first reconcile seeds authoritative truth.
+        let cw = make_client_world(0, &map);
+
+        // Native uses the loopback stub; the browser opens a real mesh-bridge socket.
+        let net: Net = make_net_client();
+
+        App {
+            renderer,
+            camera: Camera::default(),
+            input: Input::new(),
+            hud: HudState::new(),
+            particles: ParticleSystem::new(),
+            registry,
+            hotreload: HotReload::new(),
+            net,
+            cw,
+            local_node: NodeId::new(),
+            local_id: 0,
+            joined: false,
+            map,
+            last_ms: now_ms(),
+            accumulator: 0.0,
+            tick_counter: 0,
+            last_ping_ms: 0,
+        }
+    }
+
+    /// Handle window/canvas resize.
+    fn resize(&mut self, width: u32, height: u32) {
+        self.renderer.resize(width, height);
+    }
+
+    // -----------------------------------------------------------------------
+    // The frame
+    // -----------------------------------------------------------------------
+
+    /// One animation frame: pump net, step fixed-tick input/prediction, update the
+    /// camera, and render. `now` is the current local time in ms.
+    fn frame(&mut self) {
+        let now = now_ms();
+        let dt = ((now.saturating_sub(self.last_ms)) as f32 / 1000.0).min(0.25);
+        self.last_ms = now;
+
+        // --- 0. apply any staged content at this safe boundary (live shader/material
+        //        swap). A no-op unless a ContentVersion staged a new pack. ---
+        if self.registry.has_pending() {
+            self.hotreload.apply(&mut self.registry, &mut self.renderer);
+        }
+
+        // --- 1. pump the network ---
+        for msg in self.net.poll_messages() {
+            self.handle_server_msg(msg, now);
+        }
+
+        // --- 2. fixed-tick input + prediction ---
+        self.accumulator += dt;
+        let mut steps = 0;
+        while self.accumulator >= TICK_DT && steps < MAX_CATCHUP_TICKS {
+            self.accumulator -= TICK_DT;
+            steps += 1;
+            self.tick_counter = self.tick_counter.wrapping_add(1);
+
+            // The server tick we believe is current (stamped on the frame for
+            // lag-comp); 0 until the clock has synced.
+            let client_tick = if self.joined {
+                self.cw.estimated_server_tick(now)
+            } else {
+                0
+            };
+            let frame: InputFrame = self.input.end_tick(client_tick);
+            self.hud.set_selected_slot(frame.weapon_slot);
+
+            if self.joined {
+                // Apply locally *now* (instant feel) and remember it for reconcile.
+                self.cw.push_input(frame);
+
+                // Ship a batch (with the latest ack + all unacked frames) on cadence.
+                if self.tick_counter % INPUT_SEND_EVERY_TICKS == 0 {
+                    let batch = self.cw.make_input_batch(self.cw.ack_tick());
+                    self.net.send(ClientMsg::Input(batch));
+                }
+            }
+        }
+        // If we exhausted the catch-up budget, drop the backlog rather than chase it.
+        if steps == MAX_CATCHUP_TICKS {
+            self.accumulator = 0.0;
+        }
+
+        // --- liveness / clock ping ---
+        if self.joined && now.saturating_sub(self.last_ping_ms) >= PING_INTERVAL_MS {
+            self.last_ping_ms = now;
+            self.net.send(ClientMsg::Ping { client_time_ms: now });
+        }
+
+        // --- 3. gather the renderable world + update the camera ---
+        let mut entities = self.cw.render_entities(now);
+
+        // Camera position follows the predicted local player; look angles come from
+        // live input so aiming is smooth between ticks. Then drop the local body
+        // from the draw list (we are inside its head in first person).
+        if let Some(local) = entities.iter().find(|e| e.id == self.local_id).cloned() {
+            self.camera.follow(&local);
+        }
+        let (yaw, pitch) = self.input.look();
+        self.camera.yaw = yaw;
+        self.camera.pitch = pitch;
+        entities.retain(|e| e.id != self.local_id);
+
+        // --- 4. advance cosmetics, then draw ---
+        self.particles.update(dt);
+        self.hud.set_rtt(self.cw.rtt_ms());
+        self.hud.tick(dt);
+
+        // TODO: thread `&self.hud` and `&self.particles` into the renderer's HUD and
+        //       VFX passes (the draw flow seams exist in render.rs).
+        self.renderer.render(&entities, &self.camera);
+    }
+
+    /// Apply one authoritative server message.
+    fn handle_server_msg(&mut self, msg: ServerMsg, now: u64) {
+        match msg {
+            ServerMsg::JoinAccept { entity, .. } => {
+                // We are in. Adopt the assigned entity id and (re)build the predicted
+                // world around it. A real build would also fetch the announced
+                // content-addressed `map` here; we keep the test arena for now.
+                tracing::info!("join accepted: local entity {entity}");
+                self.local_id = entity;
+                self.cw = make_client_world(entity, &self.map);
+                self.joined = true;
+            }
+            ServerMsg::JoinReject { reason } => {
+                tracing::warn!("join rejected: {reason}");
+                self.joined = false;
+            }
+            ServerMsg::Snapshot(snap) => {
+                // Keep the authoritative local state for the HUD before the snapshot
+                // is consumed by the netcode.
+                let local = snap.local.clone();
+                let events = self.cw.apply_snapshot(snap, now);
+
+                self.hud.apply_local(&local);
+                self.hud.ingest_events(&events, &self.local_node);
+                for ev in &events {
+                    self.particles.spawn_from_event(ev);
+                }
+            }
+            ServerMsg::Redirect { entity, .. } => {
+                // Zone change / authority failover: re-home to the new entity id and
+                // rebuild prediction. The input stream now targets the new authority
+                // (the transport handles the topic switch).
+                tracing::info!("redirected to new authority; local entity {entity}");
+                self.local_id = entity;
+                self.cw = make_client_world(entity, &self.map);
+                self.joined = true;
+            }
+            ServerMsg::Pong {
+                client_time_ms, ..
+            } => {
+                // Round-trip sample for clock/RTT estimation.
+                self.cw.on_pong(client_time_ms, now);
+            }
+            ServerMsg::Karma(update) => {
+                tracing::info!("karma update: {update:?}");
+            }
+            ServerMsg::Kick { reason } => {
+                tracing::warn!("kicked: {reason}");
+                self.joined = false;
+            }
+        }
+    }
+
+    /// Stage a content update. `ContentVersion` is *not* a [`ServerMsg`] — it rides
+    /// the session control plane (mesh) out of band; the transport delivers it here
+    /// once the referenced pack blob has been fetched and verified. The actual swap
+    /// happens at the top of the next frame in [`App::frame`].
+    pub fn on_content_version(&mut self, version: ContentVersion, pack: ContentPack) {
+        match self.hotreload.stage(&mut self.registry, version.epoch, pack) {
+            Ok(()) => tracing::info!(
+                "staged content epoch {} ({})",
+                version.epoch,
+                version.label
+            ),
+            Err(e) => tracing::warn!("failed to stage content: {e}"),
+        }
+    }
+}
+
+/// Build the predicted client world for `local_id` over collision map `map`.
+///
+/// The replay sim's `rebuild` closure reconstructs a stripped single-player world
+/// seeded at the authoritative state each reconcile (see [`SimReplay`]).
+///
+/// NOTE / known gap: `arena_sim::World` currently exposes only `spawn_player`
+/// (which mints a fresh id) and no way to place a player at a *given* id/state. So
+/// the rebuild below cannot yet guarantee the spawned id equals `local_id`, which
+/// prediction needs. This is an `arena-sim` API gap — it should grow a
+/// `seed_player(id, &EntityState)` (or `insert_entity`) so replay starts from exact
+/// authoritative truth. The seam is wired; only that helper is missing.
+fn make_client_world(local_id: EntityId, map: &arena_sim::MapDef) -> ClientWorld<ReplaySim> {
+    let map_for_rebuild = map.clone();
+    let rebuild: RebuildFn = Box::new(move |auth: &EntityState| {
+        let mut world = arena_sim::World::new(map_for_rebuild.clone());
+        // TODO(arena-sim): replace with `world.seed_player(auth.id, auth)` so the
+        // local entity exists at exactly `auth`. Until then we best-effort spawn.
+        let _ = world.spawn_player(auth.owner.clone(), auth.team);
+        world
+    });
+    let initial = arena_sim::World::new(map.clone());
+    ClientWorld::new(local_id, SimReplay::new(initial, rebuild))
+}
+
+// ===========================================================================
+// Platform glue: window construction, the event-loop driver, the clock,
+// and the network client.
+// ===========================================================================
+
+/// Build the window. On native a normal winit window; on wasm a window backed by a
+/// `<canvas id="cerena-canvas">` appended to the document body.
+fn build_window(event_loop: &EventLoop<()>) -> Arc<Window> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let window = winit::window::WindowBuilder::new()
+            .with_title("Cerena")
+            .build(event_loop)
+            .expect("create window");
+        Arc::new(window)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::WindowBuilderExtWebSys;
+
+        // Create (or reuse) a canvas in the DOM and hand it to winit.
+        let doc = web_sys::window()
+            .and_then(|w| w.document())
+            .expect("no document");
+        let canvas = doc
+            .get_element_by_id("cerena-canvas")
+            .and_then(|e| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlCanvasElement>(e).ok())
+            .unwrap_or_else(|| {
+                let c = doc
+                    .create_element("canvas")
+                    .expect("create canvas")
+                    .dyn_into::<web_sys::HtmlCanvasElement>()
+                    .expect("canvas cast");
+                c.set_id("cerena-canvas");
+                c.set_width(1280);
+                c.set_height(720);
+                doc.body().expect("no body").append_child(&c).ok();
+                c
+            });
+
+        let window = winit::window::WindowBuilder::new()
+            .with_canvas(Some(canvas))
+            .build(event_loop)
+            .expect("create window from canvas");
+        Arc::new(window)
+    }
+}
+
+/// Drive the winit event loop. Native blocks on `run`; the browser hands the same
+/// handler to `spawn` (which returns control to the JS runtime immediately).
+fn run_event_loop(event_loop: EventLoop<()>, window: Arc<Window>, mut app: App) {
+    let handler = move |event: Event<()>, elwt: &winit::event_loop::EventLoopWindowTarget<()>| {
+        // Render continuously rather than only on OS-driven repaints.
+        elwt.set_control_flow(winit::event_loop::ControlFlow::Poll);
+
+        match event {
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => elwt.exit(),
+                WindowEvent::Resized(size) => app.resize(size.width, size.height),
+                WindowEvent::KeyboardInput {
+                    event:
+                        KeyEvent {
+                            physical_key: PhysicalKey::Code(code),
+                            state,
+                            repeat,
+                            ..
+                        },
+                    ..
+                } => {
+                    // Ignore auto-repeat: button intent is edge-driven, held state is
+                    // tracked by the down/up pair.
+                    if !repeat {
+                        app.input.on_key(code, state == ElementState::Pressed);
+                    }
+                }
+                WindowEvent::MouseInput { state, button, .. } => {
+                    app.input.on_mouse_button(button, state);
+                    // First click captures the pointer so mouse-look engages.
+                    if state == ElementState::Pressed {
+                        app.input.pointer_locked = true;
+                        #[cfg(target_arch = "wasm32")]
+                        crate::input::request_pointer_lock();
+                    }
+                }
+                WindowEvent::RedrawRequested => app.frame(),
+                _ => {}
+            },
+            // Raw mouse motion (native, and wasm while pointer-locked) drives look.
+            Event::DeviceEvent {
+                event: DeviceEvent::MouseMotion { delta: (dx, dy) },
+                ..
+            } => app.input.on_mouse_motion(dx as f32, dy as f32),
+            // Nothing pending: ask for another frame, keeping the render loop alive.
+            Event::AboutToWait => window.request_redraw(),
+            _ => {}
+        }
+    };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        event_loop.run(handler).expect("event loop run");
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::EventLoopExtWebSys;
+        event_loop.spawn(handler);
+    }
+}
+
+/// Construct the platform network client.
+fn make_net_client() -> Net {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Browsers reach the mesh through the relay's `/mesh-bridge` (see ce-net web
+        // docs): the relay bridges these WebSocket frames onto the per-zone mesh
+        // topics. The session/zone query string is filled in once matchmaking lands.
+        match crate::net::WsNetClient::connect("wss://relay.ce-net.com/mesh-bridge") {
+            Ok(c) => Box::new(c),
+            Err(e) => {
+                tracing::error!("mesh-bridge connect failed: {e:?}");
+                // A dead transport: polls nothing, drops sends. The client still runs
+                // (menus, settings) until a working connection is established.
+                Box::new(DeadNet)
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Native loopback stub until the local-node mesh connector lands.
+        Box::new(crate::net::StubNetClient::new())
+    }
+}
+
+/// A do-nothing transport used on wasm when the socket fails to open, so the client
+/// degrades to an offline state instead of panicking.
+#[cfg(target_arch = "wasm32")]
+struct DeadNet;
+
+#[cfg(target_arch = "wasm32")]
+impl NetClient for DeadNet {
+    fn poll_messages(&mut self) -> Vec<ServerMsg> {
+        Vec::new()
+    }
+    fn send(&mut self, _msg: ClientMsg) {}
+}
+
+/// Current local time in milliseconds. Browser performance clock on wasm, system
+/// clock on native — both monotonic enough for frame deltas and ping RTT.
+fn now_ms() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.performance())
+            .map(|p| p.now() as u64)
+            .unwrap_or(0)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+}
