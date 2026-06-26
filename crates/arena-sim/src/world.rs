@@ -1939,19 +1939,28 @@ mod tests {
     fn loot_spawns_on_death_and_transfers_on_pickup() {
         let mut w = world();
         let victim = place(&mut w, "v", Team::Red, Vec3::new(0.0, STAND_HALF_HEIGHT, 0.0), 0.0);
-        let looter = place(&mut w, "l", Team::Red, Vec3::new(0.5, STAND_HALF_HEIGHT, 0.0), 0.0);
-        // Give the victim a distinctive item to drop.
-        w.inventory.get_mut(&victim).unwrap().add_item(ItemId::new("item.crystal_shard"), 4);
+        let looter = place(&mut w, "l", Team::Red, Vec3::new(10.0, STAND_HALF_HEIGHT, 0.0), 0.0);
+        // Give the victim exactly one distinctive stack to drop.
+        {
+            let inv = w.inventory.get_mut(&victim).unwrap();
+            inv.slots.clear();
+            inv.add_item(ItemId::new("item.crystal_shard"), 4);
+        }
         // Kill the victim outright.
         w.entities.get_mut(&victim).unwrap().health = 0;
         w.last_attacker.insert(victim, looter);
 
-        // First tick: death + loot spawn.
+        // Tick once: death + loot spawn. The looter is far away, so no pickup yet.
         w.tick();
-        let loot_exists = w.entities.values().any(|e| e.kind == EntityKind::Pickup);
-        assert!(loot_exists, "a loot pickup should have spawned on death");
+        let loot_pos = w
+            .entities
+            .values()
+            .find(|e| e.kind == EntityKind::Pickup)
+            .map(|e| e.pos);
+        assert!(loot_pos.is_some(), "a loot pickup should spawn on death");
 
-        // The looter is standing on it; subsequent ticks transfer it.
+        // Walk the looter onto the loot, then tick until it is collected.
+        w.entities.get_mut(&looter).unwrap().pos = loot_pos.unwrap();
         let mut taken = false;
         for _ in 0..3 {
             let r = w.tick();
@@ -1963,7 +1972,7 @@ mod tests {
         assert!(taken, "the nearby player should collect the loot");
         assert!(
             w.inventory[&looter].count(&ItemId::new("item.crystal_shard")) > 0,
-            "looter should have received dropped items"
+            "looter should have received the dropped item"
         );
     }
 
