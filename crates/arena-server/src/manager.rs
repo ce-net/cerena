@@ -29,7 +29,7 @@ use arena_protocol::entity::EntityState;
 use arena_protocol::input::InputBatch;
 use arena_protocol::message::{topic, AuthorityMsg};
 use arena_protocol::world::ZoneId;
-use arena_protocol::NodeId;
+use arena_protocol::{EntityId, NodeId};
 
 use arena_content::registry::ContentRegistry;
 use arena_content::ContentPack;
@@ -50,6 +50,18 @@ pub struct HandoffRequest {
     /// The player's last authoritative state, carried so prediction stays seamless.
     pub state: EntityState,
     pub last_input_seq: u32,
+}
+
+/// One owned zone's proximity-replication material for a tick: the full player roster (for
+/// nearest-holder selection) and each player's exported checkpoint. The engine turns this into
+/// directed [`ReplicateCheckpoint`](AuthorityMsg::ReplicateCheckpoint) sends.
+pub struct ZoneReplicationBatch {
+    pub zone: ZoneId,
+    pub tick: arena_protocol::Tick,
+    /// `(player node, world position)` for every player in the zone.
+    pub players: Vec<(NodeId, glam::Vec3)>,
+    /// Each player's full checkpoint export (position, visible state, sim checkpoint).
+    pub exports: Vec<crate::replication::PlayerExport>,
 }
 
 /// Owns this node's zone authorities for one session.
@@ -177,20 +189,15 @@ impl ZoneManager {
     }
 
     /// Adopt a player handed to us by a neighbouring authority. Creates/locates the target
-    /// zone and spawns the player on its team, replying [`Adopted`](AuthorityMsg::Adopted)
-    /// with the new (per-zone) entity id.
-    ///
-    /// LIMITATION: `World` has no "place at carried state" entry point yet, so the adopted
-    /// player respawns at a spawn point rather than at its exact carried position/health.
-    /// Seamless carry-over is tracked for `arena_sim::seed_player(state)`; the carried `state`
-    /// is accepted here so the wire contract is already correct.
+    /// zone and seeds the player at its **carried authoritative state** via
+    /// [`ZoneSim::seed_player`], so the boundary crossing is seamless (exact position/health,
+    /// not a respawn). Replies [`Adopted`](AuthorityMsg::Adopted) with the new per-zone entity id.
     pub fn adopt_player(&mut self, msg: &AuthorityMsg) -> Option<AuthorityMsg> {
         let AuthorityMsg::AdoptPlayer { zone, player, state, .. } = msg else {
             return None;
         };
-        let team = state.team;
         let sim = self.ensure_zone(*zone);
-        let (entity, _spawn) = sim.add_player(player.clone(), team);
+        let entity = sim.seed_player(player.clone(), state);
         Some(AuthorityMsg::Adopted { player: player.clone(), entity })
     }
 
@@ -219,15 +226,24 @@ impl ZoneManager {
     }
 
     /// Reconcile ownership against the current candidate set: claim zones we should own and
-    /// retire zones we no longer should. Returns hand-off requests for retired zones' players.
-    /// Broadcasts an [`AuthorityClaim`](AuthorityMsg::AuthorityClaim) for each newly-claimed
-    /// zone so peers converge.
-    pub async fn reconcile_ownership(&mut self, transport: &MeshTransport) -> Vec<HandoffRequest> {
+    /// retire zones we no longer should. Broadcasts an [`AuthorityClaim`](AuthorityMsg::AuthorityClaim)
+    /// for each newly-claimed zone so peers converge.
+    ///
+    /// Returns `(handoffs, newly_claimed)`: hand-off requests for retired zones' players, and
+    /// the zones this node just took ownership of. The engine triggers failover **recovery**
+    /// (gather proximity replicas) for each newly-claimed zone — that is how a dead authority's
+    /// players are restored: discovery drops the dead node, HRW reassigns its zones to us, we
+    /// claim them here, and recovery rebuilds them from the replicas surviving peers hold.
+    pub async fn reconcile_ownership(
+        &mut self,
+        transport: &MeshTransport,
+    ) -> (Vec<HandoffRequest>, Vec<ZoneId>) {
         // Consider every active zone plus everything we currently hold.
         let mut zones: HashSet<ZoneId> = self.active_zones.clone();
         zones.extend(self.owned.keys().copied());
 
         let mut handoffs = Vec::new();
+        let mut newly_claimed = Vec::new();
         for zone in zones {
             let should = self.should_own(zone);
             let have = self.owned.contains_key(&zone);
@@ -236,13 +252,14 @@ impl ZoneManager {
                 self.ensure_zone(zone);
                 self.claim_epoch += 1;
                 self.broadcast_claim(transport, zone).await;
+                newly_claimed.push(zone);
             } else if !should && have {
                 // We no longer own it; hand its players to the new owner and drop the sim.
                 let new_owner = self.router.authority_for(zone).unwrap_or_else(|| self.me.clone());
                 handoffs.extend(self.retire_zone(zone, new_owner));
             }
         }
-        handoffs
+        (handoffs, newly_claimed)
     }
 
     /// Tear down an owned zone, returning hand-off requests for each of its players toward
@@ -345,6 +362,32 @@ impl ZoneManager {
                 (z.zone, tick, hash, z.applied_inputs())
             })
             .collect()
+    }
+
+    /// The proximity-replication material for every owned zone this tick: per zone, the full
+    /// player roster (positions, for nearest-holder selection) and each player's exported
+    /// checkpoint. The engine stamps sequences and ships these to the chosen holders.
+    pub fn replication_batch(&self) -> Vec<ZoneReplicationBatch> {
+        self.owned
+            .values()
+            .map(|z| ZoneReplicationBatch {
+                zone: z.zone,
+                tick: z.current_tick(),
+                players: z.player_positions(),
+                exports: z.export_checkpoints(),
+            })
+            .collect()
+    }
+
+    /// Restore a recovered player into a (freshly-claimed) zone from a sim checkpoint. Used by
+    /// failover recovery; returns the new per-zone entity id.
+    pub fn import_recovered(
+        &mut self,
+        zone: ZoneId,
+        player: NodeId,
+        sim_ckpt: arena_sim::PlayerCheckpoint,
+    ) -> EntityId {
+        self.ensure_zone(zone).import_player(player, sim_ckpt)
     }
 
     /// Restage a new content pack into every owned zone and update the held copy so future

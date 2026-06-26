@@ -16,6 +16,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use arena_content::ids::{AbilityId, ElementId, ItemId, MobId, SpellId, StatusId};
@@ -86,17 +87,48 @@ pub struct TickReport {
     pub deaths: Vec<(EntityId, EntityId)>,
 }
 
-/// A live status effect instance on an entity.
-#[derive(Debug, Clone)]
-struct StatusInstance {
-    id: StatusId,
+/// A live status effect instance on an entity. Public + serializable because it
+/// rides inside [`PlayerCheckpoint`] for proximity replication / failover.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusInstance {
+    pub id: StatusId,
     /// Who applied it (for kill credit on DoT).
-    source: EntityId,
-    expire_tick: Tick,
+    pub source: EntityId,
+    pub expire_tick: Tick,
     /// Next tick a periodic effect (DoT/regen/mana-burn) fires.
-    next_tick: Tick,
-    interval: u32,
-    stacks: u8,
+    pub next_tick: Tick,
+    pub interval: u32,
+    pub stacks: u8,
+}
+
+/// A lossless, serializable snapshot of one player's full simulation state.
+///
+/// This captures *everything* needed to reconstruct a player exactly: their
+/// [`EntityState`] plus all sim-owned per-player state (progression, inventory,
+/// statuses, shields, marks, action bar + cooldowns, movement runtime + cooldowns,
+/// and the last applied input seq). It is the primitive `arena-server` uses for
+/// **proximity replication** (nearby peers redundantly hold each player's state so a
+/// crashed zone authority loses nothing) and for **zone hand-off** — and the same
+/// lossless restore is the `seed_player` primitive the client/net layers wanted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerCheckpoint {
+    /// The authoritative tick at which this snapshot was taken. Monotonic per
+    /// world; the server may use it to order/dedup replicas (or stamp its own seq).
+    pub tick: Tick,
+    /// Highest input seq applied for this player, for client reconciliation.
+    pub last_input_seq: u32,
+    /// The replicated entity (pos/vel/yaw/pitch/health/armor/flags/team/weapon/owner).
+    pub state: EntityState,
+    pub rpg: RpgState,
+    pub inventory: Inventory,
+    pub statuses: Vec<StatusInstance>,
+    /// Temporary shield `(amount, expire_tick)`, if any.
+    pub shield: Option<(f32, Tick)>,
+    pub marks: HashMap<String, Tick>,
+    pub ability_bar: Vec<AbilityId>,
+    pub ability_cooldowns: HashMap<AbilityId, Tick>,
+    pub move_cooldowns: HashMap<String, Tick>,
+    pub move_runtime: MovementRuntime,
 }
 
 /// A travelling spell projectile carrying its on-impact continuation.
@@ -183,6 +215,8 @@ pub struct World {
     inputs: HashMap<EntityId, InputFrame>,
     /// Buttons held last tick, for edge detection.
     prev_buttons: HashMap<EntityId, u16>,
+    /// Highest input seq applied per player (reconciliation cursor + checkpoints).
+    last_seq: HashMap<EntityId, u32>,
     telemetry: HashMap<EntityId, TelemetryAccumulator>,
     respawn_at: HashMap<EntityId, Tick>,
     history: VecDeque<HistoryFrame>,
@@ -217,6 +251,7 @@ impl Clone for World {
             last_attacker: self.last_attacker.clone(),
             inputs: self.inputs.clone(),
             prev_buttons: self.prev_buttons.clone(),
+            last_seq: self.last_seq.clone(),
             telemetry: self.telemetry.clone(),
             respawn_at: self.respawn_at.clone(),
             history: self.history.clone(),
@@ -250,6 +285,7 @@ impl World {
             last_attacker: HashMap::new(),
             inputs: HashMap::new(),
             prev_buttons: HashMap::new(),
+            last_seq: HashMap::new(),
             telemetry: HashMap::new(),
             respawn_at: HashMap::new(),
             history: VecDeque::with_capacity(8),
@@ -345,6 +381,7 @@ impl World {
         self.last_attacker.remove(&id);
         self.inputs.remove(&id);
         self.prev_buttons.remove(&id);
+        self.last_seq.remove(&id);
         self.telemetry.remove(&id);
         self.respawn_at.remove(&id);
     }
@@ -359,7 +396,11 @@ impl World {
                 }
             }
         }
+        let seq = frame.seq;
         self.inputs.insert(id, frame);
+        // Track the last applied input seq for reconciliation and checkpoints.
+        let cur = self.last_seq.entry(id).or_insert(0);
+        *cur = (*cur).max(seq);
     }
 
     /// HUD view: `(mana, max_mana, respawn_at)`. Mana repurposes the old ammo fields
@@ -1804,6 +1845,121 @@ impl World {
         }
         out
     }
+
+    // ======================================================================
+    // Checkpoint export / import — proximity replication & zone hand-off
+    // ======================================================================
+
+    /// Find the live player entity controlled by `owner` (by the entity owner field).
+    fn entity_of_owner(&self, owner: &NodeId) -> Option<EntityId> {
+        self.entities
+            .iter()
+            .find(|(_, e)| e.kind == EntityKind::Player && &e.owner == owner)
+            .map(|(id, _)| *id)
+    }
+
+    /// Snapshot the player owned by `owner` into a fully-restorable
+    /// [`PlayerCheckpoint`]. Returns `None` if no such player exists here.
+    pub fn export_player(&self, owner: &NodeId) -> Option<PlayerCheckpoint> {
+        let id = self.entity_of_owner(owner)?;
+        let state = self.entities.get(&id)?.clone();
+        Some(PlayerCheckpoint {
+            tick: self.tick,
+            last_input_seq: self.last_seq.get(&id).copied().unwrap_or(0),
+            state,
+            rpg: self.rpg.get(&id).cloned().unwrap_or_default(),
+            inventory: self.inventory.get(&id).cloned().unwrap_or_default(),
+            statuses: self.statuses.get(&id).cloned().unwrap_or_default(),
+            shield: self.shields.get(&id).copied(),
+            marks: self.marks.get(&id).cloned().unwrap_or_default(),
+            ability_bar: self.ability_bar.get(&id).cloned().unwrap_or_default(),
+            ability_cooldowns: self.ability_cooldowns.get(&id).cloned().unwrap_or_default(),
+            move_cooldowns: self.move_cooldowns.get(&id).cloned().unwrap_or_default(),
+            move_runtime: self.move_runtime.get(&id).cloned().unwrap_or_default(),
+        })
+    }
+
+    /// (Re)create a player at *exactly* the checkpoint state. If a player for the
+    /// checkpoint's owner already exists it is replaced in place (same `EntityId`);
+    /// otherwise a fresh id is allocated. Returns the entity id. This is the lossless
+    /// restore used by failover recovery and zone hand-off.
+    pub fn import_player(&mut self, ckpt: PlayerCheckpoint) -> EntityId {
+        let id = match self.entity_of_owner(&ckpt.state.owner) {
+            Some(existing) => existing,
+            None => {
+                let i = self.next_id;
+                self.next_id += 1;
+                i
+            }
+        };
+
+        let mut state = ckpt.state;
+        state.id = id;
+        state.kind = EntityKind::Player;
+        self.entities.insert(id, state);
+
+        self.rpg.insert(id, ckpt.rpg);
+        self.inventory.insert(id, ckpt.inventory);
+        if ckpt.statuses.is_empty() {
+            self.statuses.remove(&id);
+        } else {
+            self.statuses.insert(id, ckpt.statuses);
+        }
+        match ckpt.shield {
+            Some(s) => {
+                self.shields.insert(id, s);
+            }
+            None => {
+                self.shields.remove(&id);
+            }
+        }
+        self.marks.insert(id, ckpt.marks);
+        self.ability_bar.insert(id, ckpt.ability_bar);
+        self.ability_cooldowns.insert(id, ckpt.ability_cooldowns);
+        self.move_cooldowns.insert(id, ckpt.move_cooldowns);
+        self.move_runtime.insert(id, ckpt.move_runtime);
+        self.last_seq.insert(id, ckpt.last_input_seq);
+        self.telemetry.entry(id).or_default();
+        // A restored player is live, not awaiting respawn.
+        self.respawn_at.remove(&id);
+        id
+    }
+
+    /// Best-effort seed of a player at a given [`EntityState`] with *default*
+    /// progression (no inventory/abilities). This is the lightweight hand-off /
+    /// client-prediction primitive: it places the body so the world can be driven,
+    /// without a full checkpoint. Replaces an existing player for `owner` in place.
+    pub fn seed_player(&mut self, owner: NodeId, state: &EntityState) -> EntityId {
+        let id = match self.entity_of_owner(&owner) {
+            Some(existing) => existing,
+            None => {
+                let i = self.next_id;
+                self.next_id += 1;
+                i
+            }
+        };
+        let mut st = state.clone();
+        st.id = id;
+        st.kind = EntityKind::Player;
+        st.owner = owner;
+        self.entities.insert(id, st);
+        // Only fill in progression scaffolding if this is a brand-new body; never
+        // clobber an existing player's accumulated state.
+        self.rpg.entry(id).or_default();
+        self.inventory.entry(id).or_default();
+        self.ability_bar.entry(id).or_default();
+        self.move_runtime.entry(id).or_default();
+        self.telemetry.entry(id).or_default();
+        self.last_seq.entry(id).or_insert(0);
+        id
+    }
+
+    /// A deterministic per-player content sub-hash (rounds floats, sorts maps), for
+    /// cross-validating that a replica matches the authority. Independent of the
+    /// snapshot tick, so it is stable across export/import.
+    pub fn player_hash(&self, owner: &NodeId) -> Option<[u8; 32]> {
+        self.export_player(owner).map(|c| checkpoint_hash(&c))
+    }
 }
 
 /// Status-derived movement modifiers.
@@ -1829,6 +1985,117 @@ fn faction_ok(
         Faction::SelfOnly => target == caster,
         Faction::All => true,
     }
+}
+
+/// Deterministic content hash of a [`PlayerCheckpoint`]. Floats are rounded to 1e-3
+/// and every map/set is visited in sorted order, so two checkpoints carrying the
+/// same player state hash identically regardless of HashMap iteration order or the
+/// snapshot tick (which is deliberately excluded).
+fn checkpoint_hash(c: &PlayerCheckpoint) -> [u8; 32] {
+    fn q(v: f32) -> i64 {
+        (v * 1000.0).round() as i64
+    }
+    let mut h = Sha256::new();
+
+    // Entity.
+    let e = &c.state;
+    h.update([e.kind as u8, e.team as u8, e.weapon]);
+    for v in [e.pos.x, e.pos.y, e.pos.z, e.vel.x, e.vel.y, e.vel.z, e.yaw, e.pitch] {
+        h.update(q(v).to_le_bytes());
+    }
+    h.update(e.health.to_le_bytes());
+    h.update(e.armor.to_le_bytes());
+    h.update(e.flags.0.to_le_bytes());
+    h.update(e.owner.as_bytes());
+    h.update([0]);
+
+    // Progression.
+    h.update(c.rpg.level.to_le_bytes());
+    h.update(c.rpg.xp.to_le_bytes());
+    h.update(c.rpg.skill_points.to_le_bytes());
+    for v in [
+        c.rpg.attributes.power,
+        c.rpg.attributes.focus,
+        c.rpg.attributes.agility,
+        c.rpg.attributes.vitality,
+        c.rpg.mana,
+        c.rpg.max_mana,
+        c.rpg.stamina,
+        c.rpg.max_stamina,
+    ] {
+        h.update(q(v).to_le_bytes());
+    }
+    let mut tech: Vec<&str> = c.rpg.unlocked_tech.iter().map(|t| t.0.as_str()).collect();
+    tech.sort_unstable();
+    for t in tech {
+        h.update(t.as_bytes());
+        h.update([0]);
+    }
+
+    // Inventory.
+    let mut slots: Vec<(&str, u16)> = c.inventory.slots.iter().map(|(i, q)| (i.0.as_str(), *q)).collect();
+    slots.sort_unstable();
+    for (i, q) in slots {
+        h.update(i.as_bytes());
+        h.update(q.to_le_bytes());
+    }
+    let mut eq: Vec<(u8, &str)> = c.inventory.equipped.iter().map(|(s, i)| (*s as u8, i.0.as_str())).collect();
+    eq.sort_unstable();
+    for (s, i) in eq {
+        h.update([s]);
+        h.update(i.as_bytes());
+    }
+
+    // Statuses (sorted by id).
+    let mut st: Vec<&StatusInstance> = c.statuses.iter().collect();
+    st.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+    for s in st {
+        h.update(s.id.0.as_bytes());
+        h.update([s.stacks]);
+        h.update(s.expire_tick.to_le_bytes());
+        h.update(s.next_tick.to_le_bytes());
+    }
+
+    // Shield.
+    if let Some((amt, exp)) = c.shield {
+        h.update(q(amt).to_le_bytes());
+        h.update(exp.to_le_bytes());
+    }
+
+    // Marks (sorted).
+    let mut marks: Vec<(&str, Tick)> = c.marks.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    marks.sort_unstable();
+    for (k, v) in marks {
+        h.update(k.as_bytes());
+        h.update(v.to_le_bytes());
+    }
+
+    // Action bar (order is meaningful) + cooldowns (sorted).
+    for a in &c.ability_bar {
+        h.update(a.0.as_bytes());
+        h.update([0]);
+    }
+    let mut cds: Vec<(&str, Tick)> = c.ability_cooldowns.iter().map(|(k, v)| (k.0.as_str(), *v)).collect();
+    cds.sort_unstable();
+    for (k, v) in cds {
+        h.update(k.as_bytes());
+        h.update(v.to_le_bytes());
+    }
+    let mut mcs: Vec<(&str, Tick)> = c.move_cooldowns.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    mcs.sort_unstable();
+    for (k, v) in mcs {
+        h.update(k.as_bytes());
+        h.update(v.to_le_bytes());
+    }
+
+    // Movement runtime + reconciliation cursor.
+    h.update([c.move_runtime.extra_jumps_used, c.move_runtime.slam_pending as u8]);
+    h.update(c.last_input_seq.to_le_bytes());
+
+    let d = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&d);
+    out
 }
 
 #[cfg(test)]
@@ -2038,5 +2305,70 @@ mod tests {
             w.state_hash()
         }
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn export_import_player_is_lossless() {
+        let mut w = world();
+        let owner = "wizard-1".to_string();
+        let id = w.spawn_player(owner.clone(), Team::Red);
+        // Build up some non-trivial, varied state to snapshot.
+        w.rpg.get_mut(&id).unwrap().grant_xp(500);
+        w.rpg.get_mut(&id).unwrap().mana = 42.0;
+        w.apply_status_to(id, &StatusId::new("status.burning"), 4.0, 2, w.current_tick(), id);
+        w.inventory.get_mut(&id).unwrap().add_item(ItemId::new("item.crystal_shard"), 7);
+        {
+            let e = w.entities.get_mut(&id).unwrap();
+            e.pos = Vec3::new(3.0, 1.5, -2.0);
+            e.health = 73;
+        }
+
+        let ckpt = w.export_player(&owner).expect("export should succeed");
+        let h1 = w.player_hash(&owner).expect("source hash");
+
+        // Restore into a brand-new world (the failover-recovery path).
+        let mut w2 = world();
+        let nid = w2.import_player(ckpt.clone());
+
+        let src = &w.entities[&id];
+        let dst = &w2.entities[&nid];
+        assert_eq!(dst.pos, src.pos, "position must survive the round-trip");
+        assert_eq!(dst.health, src.health, "health must survive");
+        assert_eq!(dst.owner, owner, "owner must survive");
+        assert_eq!(w2.rpg[&nid].level, w.rpg[&id].level, "level must survive");
+        assert_eq!(
+            w2.inventory[&nid].count(&ItemId::new("item.crystal_shard")),
+            7,
+            "inventory must survive"
+        );
+        let h2 = w2.player_hash(&owner).expect("restored hash");
+        assert_eq!(h1, h2, "per-player sub-hash must be identical after restore");
+    }
+
+    #[test]
+    fn seed_player_creates_a_movable_body() {
+        let mut w = world();
+        let owner = "ghost-1".to_string();
+        let mut st = EntityState {
+            id: 0,
+            kind: EntityKind::Player,
+            pos: Vec3::new(5.0, STAND_HALF_HEIGHT, 5.0),
+            vel: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            flags: EntityFlags::default(),
+            team: Team::Blue,
+            health: 100,
+            armor: 0,
+            weapon: 0,
+            owner: String::new(),
+        };
+        st.flags.set(EntityFlags::ON_GROUND, true);
+        let id = w.seed_player(owner.clone(), &st);
+        assert_eq!(w.entities[&id].owner, owner, "seed sets the owner");
+        assert_eq!(w.entities[&id].pos, st.pos);
+        // Re-seeding the same owner replaces in place (same id).
+        let id2 = w.seed_player(owner.clone(), &st);
+        assert_eq!(id, id2, "re-seeding an owner reuses the entity id");
     }
 }

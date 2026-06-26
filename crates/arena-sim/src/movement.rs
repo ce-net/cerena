@@ -12,6 +12,7 @@
 //! authoritative.
 
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 
 use arena_content::movement::MovementKind;
 use arena_protocol::entity::{EntityFlags, EntityState};
@@ -53,7 +54,7 @@ pub const CROUCH_HALF_HEIGHT: f32 = 0.6;
 pub const EYE_DROP: f32 = 0.15;
 
 /// Per-entity transient parkour state the world keeps between ticks.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MovementRuntime {
     /// Mid-air jumps already spent this airtime (reset on landing).
     pub extra_jumps_used: u8,

@@ -53,4 +53,4 @@ pub use inventory::Inventory;
 pub use magic::CastContext;
 pub use map::MapDef;
 pub use rpg::{Attributes, Derived, RpgState};
-pub use world::{CheatCounters, TickReport, World};
+pub use world::{CheatCounters, PlayerCheckpoint, StatusInstance, TickReport, World};

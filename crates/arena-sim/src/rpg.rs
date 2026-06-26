@@ -9,12 +9,14 @@
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
+
 use arena_content::ids::TechNodeId;
 use arena_content::item::StatMods;
 
 /// The four primary attributes. They rise on level-up and via gear/tech, and feed
 /// the derived stats and spell scaling.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Attributes {
     pub power: f32,
     pub focus: f32,
@@ -56,7 +58,7 @@ pub struct Derived {
 }
 
 /// One character's progression and resource pools.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpgState {
     pub level: u32,
     pub xp: u64,

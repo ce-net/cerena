@@ -36,6 +36,11 @@
 //! 3. **Seamless hand-off** migrates a player (and its authoritative state) to the
 //!    neighbouring authority as it crosses a zone boundary, so the world is continuous even
 //!    though it is sharded across many nodes.
+//! 4. **Proximity replication** ([`replication`]) makes a crashed authority lossless: each
+//!    player's full checkpoint is continuously held by the K nearest *other* players, who
+//!    fail independently of the authority. On failover the successor gathers those replicas
+//!    and rebuilds the zone exactly — the players standing next to you are your backup, with
+//!    no central standby.
 //!
 //! ## How a sharded sim stays honest
 //!
@@ -72,6 +77,7 @@ pub mod config;
 pub mod coordinator;
 pub mod handler;
 pub mod manager;
+pub mod replication;
 pub mod server;
 pub mod zone;
 

@@ -45,6 +45,12 @@ pub struct ServerConfig {
     /// Simulation tick rate in Hz. Defaults to [`arena_protocol::TICK_HZ`]; overridable so a
     /// test can run a slow, observable clock.
     pub tick_hz: u32,
+    /// Proximity-replication factor K: how many nearby peers redundantly hold each player's
+    /// full checkpoint, so a crashed zone authority loses nothing. Default 3.
+    pub replication_factor: usize,
+    /// How often (in sim ticks) the authority pushes fresh player checkpoints to its holders.
+    /// Default 64 (~1 s at 64 Hz).
+    pub replication_interval_ticks: u32,
 }
 
 impl Default for ServerConfig {
@@ -59,6 +65,8 @@ impl Default for ServerConfig {
             e2e_admin: false,
             e2e_cheat: false,
             tick_hz: TICK_HZ,
+            replication_factor: 3,
+            replication_interval_ticks: 64,
         }
     }
 }

@@ -173,6 +173,45 @@ impl ZoneSim {
         (entity, spawn)
     }
 
+    /// Adopt a player at a *carried* authoritative state (hand-off / failover), placing them
+    /// exactly where they were via [`World::seed_player`] rather than at a fresh spawn.
+    pub fn seed_player(&mut self, node: NodeId, state: &EntityState) -> EntityId {
+        let entity = self.world.seed_player(node.clone(), state);
+        self.players.insert(node, PlayerSlot::new(entity, self.tick));
+        entity
+    }
+
+    /// Restore a player from a full sim checkpoint (lossless failover recovery): rebuilds
+    /// progression/inventory/status, not just the visible transform.
+    pub fn import_player(&mut self, node: NodeId, ckpt: arena_sim::PlayerCheckpoint) -> EntityId {
+        let entity = self.world.import_player(ckpt);
+        self.players.insert(node, PlayerSlot::new(entity, self.tick));
+        entity
+    }
+
+    /// Export every hosted player's full checkpoint for proximity replication. Each carries
+    /// the player's position (for nearest-holder selection), visible state, and the opaque sim
+    /// checkpoint the engine serialises into the wire `blob`.
+    pub fn export_checkpoints(&self) -> Vec<crate::replication::PlayerExport> {
+        let mut out = Vec::with_capacity(self.players.len());
+        for (node, slot) in &self.players {
+            let Some(state) = self.world.entities().get(&slot.entity).cloned() else {
+                continue;
+            };
+            let Some(sim_ckpt) = self.world.export_player(node) else {
+                continue;
+            };
+            out.push(crate::replication::PlayerExport {
+                player: node.clone(),
+                entity: slot.entity,
+                pos: state.pos,
+                state,
+                sim_ckpt,
+            });
+        }
+        out
+    }
+
     /// Remove a player (disconnect / hand-off), tearing down its sim entity and baselines.
     /// Returns the player's last authoritative state for hand-off carry-over, if present.
     pub fn remove_player(&mut self, node: &NodeId) -> Option<(EntityState, u32)> {

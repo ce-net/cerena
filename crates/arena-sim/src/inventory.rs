@@ -11,12 +11,14 @@
 //! small `Vec<(EquipSlot, ItemId)>` (at most one entry per slot) rather than a
 //! `HashMap` — semantically the same, and it keeps the slot type untouched.
 
+use serde::{Deserialize, Serialize};
+
 use arena_content::ids::{AbilityId, ItemId, MovementModeId, SpellId};
 use arena_content::item::{CraftRecipe, EquipSlot, ItemDef, StatMods};
 use arena_content::registry::ContentRegistry;
 
 /// What a character carries and wears.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Inventory {
     /// Carried stacks: `(item, quantity)`. Non-stackable items appear as `qty 1`.
     pub slots: Vec<(ItemId, u16)>,
