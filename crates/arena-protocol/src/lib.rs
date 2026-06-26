@@ -1,6 +1,6 @@
 //! # arena-protocol
 //!
-//! The shared contract for CE Arena — a thousands-of-players FPS that runs its
+//! The shared contract for Cerena — a thousands-of-players FPS that runs its
 //! authoritative simulation *on the CE mesh itself*. Player nodes are trusted by
 //! identity (each CE node id is an Ed25519 key), so any sufficiently-staked node
 //! can host a slice of the world.

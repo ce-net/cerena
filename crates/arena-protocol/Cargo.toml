@@ -5,7 +5,7 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Wire protocol, shared types, and tunables for the CE Arena distributed FPS."
+description = "Wire protocol, shared types, and tunables for the Cerena distributed FPS."
 
 [dependencies]
 glam.workspace = true

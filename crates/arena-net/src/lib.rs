@@ -1,4 +1,4 @@
-//! # arena-net — CE Arena netcode
+//! # arena-net — Cerena netcode
 //!
 //! Pure netcode logic for the distributed FPS. No tokio, no `ce_rs`, no `wgpu`:
 //! everything here is deterministic, allocation-light, and `wasm32` clean so the
@@ -9,7 +9,7 @@
 //!
 //! ## The netcode model
 //!
-//! CE Arena uses the standard server-authoritative recipe proven by Quake 3 →
+//! Cerena uses the standard server-authoritative recipe proven by Quake 3 →
 //! Source → Overwatch, adapted to a mesh where the "server" is whichever node
 //! currently holds the player's zone authority.
 //!

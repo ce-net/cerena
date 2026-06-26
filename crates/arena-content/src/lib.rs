@@ -1,6 +1,6 @@
 //! # arena-content
 //!
-//! The entire **game-design surface** of CE Arena, expressed as **data** so it can
+//! The entire **game-design surface** of Cerena, expressed as **data** so it can
 //! be **hot-reloaded into a live 10,000-player match**. Code (in `arena-sim` and
 //! `arena-client`) is a fixed *interpreter*; everything a designer tweaks day-to-day
 //! — spells, items, the tech tree, abilities, movement modes, materials, shaders,

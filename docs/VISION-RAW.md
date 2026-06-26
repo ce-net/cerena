@@ -1,4 +1,4 @@
-# CE Arena — Raw Vision (Leif's words, verbatim)
+# Cerena — Raw Vision (Leif's words, verbatim)
 
 > This file is the unedited source of truth for the game's vision. Captured exactly
 > as Leif wrote it. Do not paraphrase, "improve", or reorganize the ideas in this

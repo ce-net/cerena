@@ -1,4 +1,4 @@
-//! # arena-mesh — CE mesh integration for CE Arena
+//! # arena-mesh — CE mesh integration for Cerena
 //!
 //! This crate is the seam between the abstract game protocol (`arena-protocol`) and
 //! the **real CE mesh** (`ce_rs`). It sits *beneath* the simulation, networking, and

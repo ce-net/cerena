@@ -1,9 +1,9 @@
-# CE Arena — Design (interpreting VISION-RAW.md)
+# Cerena — Design (interpreting VISION-RAW.md)
 
 This document is the engineering interpretation of `VISION-RAW.md`. When the two
 disagree, the raw vision wins; fix this doc, not the vision.
 
-CE Arena is a **massively-multiplayer (10,000 concurrent) first-person procedural
+Cerena is a **massively-multiplayer (10,000 concurrent) first-person procedural
 mage RPG** that runs its authoritative simulation **on the CE mesh** — the players'
 own nodes are the servers, trusted by cryptographic identity. Magic, items, the
 tech tree, the world, and even the shaders are **data**, distributed as

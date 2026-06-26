@@ -1,6 +1,6 @@
 //! # arena-karma
 //!
-//! The reporting, anti-cheat, and karma subsystem for CE Arena. It runs as a
+//! The reporting, anti-cheat, and karma subsystem for Cerena. It runs as a
 //! service *inside* the session coordinator / `arena-server`; it is pure logic
 //! plus `serde_json` persistence — no tokio, no `ce_rs`. The transport layer
 //! (`arena-mesh`) feeds it the wire types from [`arena_protocol::karma`] and the
@@ -9,7 +9,7 @@
 //!
 //! ## Threat model
 //!
-//! CE Arena runs an authoritative FPS simulation *on the mesh itself*: any
+//! Cerena runs an authoritative FPS simulation *on the mesh itself*: any
 //! sufficiently-staked node can host a slice of the world. That buys scale, but it
 //! splits the cheating problem in two, and this crate defends both halves.
 //!

@@ -36,7 +36,7 @@ edition = "2024"
 version = "0.1.0"
 authors = ["Leif Rydenfalk <ledamecrydenfalk@gmail.com>"]
 license = "MIT"
-repository = "https://github.com/ce-net/ce-arena"
+repository = "https://github.com/ce-net/cerena"
 
 [workspace.dependencies]
 # Shared math. glam is the de-facto standard; serde feature for wire encoding.
