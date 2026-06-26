@@ -141,6 +141,73 @@ pub enum AuthorityMsg {
         /// The verifier's own result hash, for dispute logging.
         their_hash: [u8; 32],
     },
+
+    // ---- proximity replication (redundancy) ----
+    //
+    // A zone authority is a single point of failure for the players in its zone.
+    // To make a crash lossless we replicate each player's full authoritative state
+    // to a handful of *nearby* peers (the players physically closest to them in the
+    // world). If the authority vanishes, the successor gathers those replicas and
+    // reconstructs the zone exactly, rather than only from the authority's last
+    // broadcast snapshot. This is the same proximity-replica trick spacegame uses
+    // ("a standby adopts the replicated sector snapshot"), generalized to per-player
+    // checkpoints held by whoever is standing next to you.
+    /// Authority -> chosen replica-holder peers: "store these player checkpoints for
+    /// `zone`; you are a redundant copy in case I die." The holder need not be an
+    /// authority — any participating node (even a light/browser peer) can hold them.
+    ReplicateCheckpoint {
+        session: SessionId,
+        zone: ZoneId,
+        tick: Tick,
+        /// The authority issuing these checkpoints (so a holder can ignore stale
+        /// copies from a deposed authority).
+        authority: NodeId,
+        checkpoints: Vec<PlayerCheckpoint>,
+    },
+    /// Holder -> authority ack: highest checkpoint seq durably held, per player. Lets
+    /// the authority confirm a replication factor is actually met before trusting it.
+    ReplicaStored {
+        holder: NodeId,
+        zone: ZoneId,
+        /// (player, highest seq held).
+        acked: Vec<(NodeId, u64)>,
+    },
+    /// Successor authority -> the fleet on failover: "I just adopted `zone`; send me
+    /// every player checkpoint you are holding for it." Broadcast on the authority
+    /// control plane; any holder replies.
+    RequestReplicas {
+        session: SessionId,
+        zone: ZoneId,
+        requester: NodeId,
+    },
+    /// Holder -> successor: the checkpoints it holds for the requested zone. The
+    /// successor imports the newest per player to rebuild the zone losslessly.
+    ReplicaBundle {
+        zone: ZoneId,
+        holder: NodeId,
+        checkpoints: Vec<PlayerCheckpoint>,
+    },
+}
+
+/// A replicated, point-in-time snapshot of one player's *full* authoritative state
+/// (entity transform + health, plus the RPG/inventory/progression the simulation
+/// owns). The progression payload is an opaque `blob` — `bincode` of an
+/// `arena_sim` checkpoint type — so the protocol crate stays free of any sim/content
+/// dependency and a holder can store it without understanding it. Only an authority
+/// importing the checkpoint interprets the blob.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerCheckpoint {
+    pub player: NodeId,
+    pub entity: crate::EntityId,
+    /// Monotonic per-player checkpoint sequence; a holder keeps only the newest.
+    pub seq: u64,
+    pub tick: Tick,
+    /// The visible entity state (so even a holder that can't decode `blob` can render
+    /// or hand off a coarse copy).
+    pub state: crate::entity::EntityState,
+    /// Opaque `bincode(arena_sim::PlayerCheckpoint)` — the progression/inventory/
+    /// status payload the authority needs to restore the player exactly.
+    pub blob: Vec<u8>,
 }
 
 /// Top-level tagged envelope. The first decoded field is the variant tag, so a
@@ -197,6 +264,14 @@ pub mod topic {
     /// Authority-to-authority control plane for a session.
     pub fn authority(session: &SessionId) -> String {
         format!("{}/authority", session.topic_root())
+    }
+
+    /// Proximity-replication plane for a zone: the authority pushes checkpoints and
+    /// broadcasts replica-gather requests here; holders subscribe to their zones.
+    /// (Holders are addressed directly for checkpoints; the failover gather is a
+    /// broadcast on this topic so any surviving holder can answer.)
+    pub fn replication(session: &SessionId, zone: ZoneId) -> String {
+        format!("{}/{}/replica", session.topic_root(), zone.token())
     }
 
     /// The session coordinator's join/matchmaking endpoint.
