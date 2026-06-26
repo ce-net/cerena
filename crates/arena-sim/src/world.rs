@@ -18,7 +18,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use glam::Vec3;
 use sha2::{Digest, Sha256};
 
-use arena_content::ability::AbilityDef;
 use arena_content::ids::{AbilityId, ElementId, ItemId, MobId, SpellId, StatusId};
 use arena_content::item::StatMods;
 use arena_content::movement::{MovementKind, MovementModeDef};
@@ -910,10 +909,16 @@ impl World {
                 .find(|iid| self.content.item(iid).map(|d| d.on_use.is_some()).unwrap_or(false))
         };
         let Some(item) = chosen else { return };
-        let spell_id = match self.inventory.get_mut(&id).and_then(|inv| inv.consume(&self.content, &item)) {
-            Some(s) => s,
-            None => return,
-        };
+        // Resolve the on-use spell before mutating the bag (keeps borrows disjoint).
+        let Some(spell_id) = self.content.item(&item).and_then(|d| d.on_use.clone()) else { return };
+        let removed = self
+            .inventory
+            .get_mut(&id)
+            .map(|inv| inv.remove_item(&item, 1))
+            .unwrap_or(0);
+        if removed == 0 {
+            return;
+        }
         let Some(spell) = self.content.spell(&spell_id).cloned() else { return };
         let (origin, dir) = {
             let e = self.entities.get(&id).unwrap();

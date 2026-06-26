@@ -1426,3 +1426,267 @@ fn missions() -> Vec<MissionDef> {
         },
     ]
 }
+
+// ---------------------------------------------------------------------------
+// Loot tables — named weighted drop pools. Mobs, spawn rules, and triggers all
+// reference these by id, so the whole drop economy is retuned in one place, live.
+// ---------------------------------------------------------------------------
+
+fn loot_tables() -> Vec<LootTableDef> {
+    // Helper: one weighted entry.
+    fn e(item: &str, weight: f32, min: u16, max: u16, rarity_bonus: f32) -> LootEntry {
+        LootEntry { item: ItemId::new(item), weight, min, max, rarity_bonus }
+    }
+    vec![
+        // Novice: what the lowland critters cough up. Mostly reagents and the odd potion.
+        LootTableDef {
+            id: LootTableId::new("loot.novice"),
+            name: "Novice Drops".into(),
+            entries: vec![
+                e("item.mana_crystal", 6.0, 1, 2, 0.0),
+                e("item.crystal_shard", 3.0, 1, 1, 0.0),
+            ],
+            rolls: 1,
+            level_scaling: 0.0,
+        },
+        // Common: standard field drops with a small chance of starter gear.
+        LootTableDef {
+            id: LootTableId::new("loot.common"),
+            name: "Common Drops".into(),
+            entries: vec![
+                e("item.crystal_shard", 6.0, 1, 3, 0.0),
+                e("item.mana_crystal", 4.0, 1, 2, 0.0),
+                e("item.novice_robe", 0.5, 1, 1, 0.2),
+            ],
+            rolls: 2,
+            level_scaling: 0.1,
+        },
+        // Rare: hollows/elite drops — essences and mid-tier gear.
+        LootTableDef {
+            id: LootTableId::new("loot.rare"),
+            name: "Rare Drops".into(),
+            entries: vec![
+                e("item.void_essence", 5.0, 1, 2, 0.0),
+                e("item.crystal_shard", 4.0, 2, 4, 0.0),
+                e("item.grapple_glove", 0.6, 1, 1, 0.3),
+                e("item.storm_ring", 0.4, 1, 1, 0.4),
+            ],
+            rolls: 2,
+            level_scaling: 0.2,
+        },
+        // Boss: the highland golems and named foes — many reagents plus a shot at
+        // legendaries. Higher rolls + rarity bonuses skew toward the good stuff.
+        LootTableDef {
+            id: LootTableId::new("loot.boss"),
+            name: "Boss Hoard".into(),
+            entries: vec![
+                e("item.crystal_shard", 8.0, 4, 8, 0.0),
+                e("item.void_essence", 5.0, 2, 4, 0.0),
+                e("item.storm_ring", 1.0, 1, 1, 0.5),
+                e("item.phoenix_amulet", 0.25, 1, 1, 0.6),
+                e("item.void_relic", 0.2, 1, 1, 0.6),
+            ],
+            rolls: 3,
+            level_scaling: 0.35,
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Game modes — three ways to play the same simulation. Switching the active mode,
+// or retuning a scoring value, is a hot-reload: the rules are data, the loop is code.
+// ---------------------------------------------------------------------------
+
+fn game_modes() -> Vec<GameModeDef> {
+    vec![
+        // The persistent open world: never ends, everyone for themselves, loot drops,
+        // and the world spawns hostile waves. The default "mystery RPG" experience.
+        GameModeDef {
+            id: GameModeId::new("gamemode.open_world"),
+            name: "Open World".into(),
+            description: "A persistent, endless PvPvE sandbox. Explore, fight mobs and \
+                          mages alike, and keep what you can carry."
+                .into(),
+            teams: TeamConfig::FreeForAll,
+            win: WinCondition::Endless,
+            scoring: vec![ScoringRule::KillPoints { points: 1 }],
+            respawn_seconds: 5.0,
+            allow_loot_drops: true,
+            loot_multiplier: 1.0,
+            starting_loadout: vec![AbilityId::new("ability.fireball")],
+            starting_items: vec![(ItemId::new("item.mana_crystal"), 3)],
+            pvp_enabled: true,
+            mob_waves: true,
+        },
+        // Arena deathmatch: fast FFA to a score limit, no loot to keep it clean.
+        GameModeDef {
+            id: GameModeId::new("gamemode.arena_deathmatch"),
+            name: "Arena Deathmatch".into(),
+            description: "Free-for-all arena combat. First to the score limit wins; \
+                          everyone starts on equal footing."
+                .into(),
+            teams: TeamConfig::FreeForAll,
+            win: WinCondition::ScoreLimit { points: 30 },
+            scoring: vec![
+                ScoringRule::KillPoints { points: 1 },
+                ScoringRule::FirstBloodBonus { points: 2 },
+            ],
+            respawn_seconds: 3.0,
+            allow_loot_drops: false,
+            loot_multiplier: 0.0,
+            starting_loadout: vec![
+                AbilityId::new("ability.fireball"),
+                AbilityId::new("ability.frostbolt"),
+                AbilityId::new("ability.arcane_lance"),
+            ],
+            starting_items: vec![],
+            pvp_enabled: true,
+            mob_waves: false,
+        },
+        // Conquest: two teams contesting objectives.
+        GameModeDef {
+            id: GameModeId::new("gamemode.conquest"),
+            name: "Conquest".into(),
+            description: "Two teams fight to capture and hold objectives across the map."
+                .into(),
+            teams: TeamConfig::Teams { count: 2, friendly_fire: false },
+            win: WinCondition::ObjectiveCapture { count: 3 },
+            scoring: vec![
+                ScoringRule::ObjectivePoints { points: 5 },
+                ScoringRule::KillPoints { points: 1 },
+                ScoringRule::AssistPoints { points: 1 },
+            ],
+            respawn_seconds: 8.0,
+            allow_loot_drops: false,
+            loot_multiplier: 0.0,
+            starting_loadout: vec![AbilityId::new("ability.fireball")],
+            starting_items: vec![(ItemId::new("item.mana_crystal"), 2)],
+            pvp_enabled: true,
+            mob_waves: false,
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Spawn rules — how the open world populates. The authority evaluates these to keep
+// each biome stocked; editing them repopulates or rebalances the world live.
+// ---------------------------------------------------------------------------
+
+fn spawn_rules() -> Vec<SpawnRuleDef> {
+    vec![
+        // A gentle, self-replenishing trickle of wisps in the lowlands.
+        SpawnRuleDef {
+            id: SpawnRuleId::new("spawn.lowland_wisps"),
+            name: "Lowland Wisps".into(),
+            mob: MobId::new("mob.wisp"),
+            trigger: SpawnTrigger::Continuous { interval_s: 8.0 },
+            max_alive: 24,
+            biome_filter: vec!["lowlands".into(), "forest".into()],
+            level_scaling: 0.05,
+            loot_table: Some(LootTableId::new("loot.novice")),
+        },
+        // Forest guardians appear when a player wanders into the deep woods.
+        SpawnRuleDef {
+            id: SpawnRuleId::new("spawn.forest_guardians"),
+            name: "Forest Guardians".into(),
+            mob: MobId::new("mob.forest_guardian"),
+            trigger: SpawnTrigger::OnZoneEnter,
+            max_alive: 6,
+            biome_filter: vec!["forest".into()],
+            level_scaling: 0.1,
+            loot_table: Some(LootTableId::new("loot.common")),
+        },
+        // The hollows breathe out wraith invasions in periodic waves.
+        SpawnRuleDef {
+            id: SpawnRuleId::new("spawn.hollows_wraiths"),
+            name: "Wraith Incursion".into(),
+            mob: MobId::new("mob.void_wraith"),
+            trigger: SpawnTrigger::Wave { wave_size: 6, interval_s: 45.0 },
+            max_alive: 30,
+            biome_filter: vec!["hollows".into()],
+            level_scaling: 0.2,
+            loot_table: Some(LootTableId::new("loot.rare")),
+        },
+        // Crystal golems stand guard over the highlands; rare and rewarding.
+        SpawnRuleDef {
+            id: SpawnRuleId::new("spawn.highland_golems"),
+            name: "Highland Golems".into(),
+            mob: MobId::new("mob.crystal_golem"),
+            trigger: SpawnTrigger::Continuous { interval_s: 30.0 },
+            max_alive: 8,
+            biome_filter: vec!["highlands".into()],
+            level_scaling: 0.3,
+            loot_table: Some(LootTableId::new("loot.boss")),
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Triggers — the data-driven scripting layer. New behaviour ships as data: edit
+// these and hot-reload, no code deploy. The sim evaluates matching triggers per tick.
+// ---------------------------------------------------------------------------
+
+fn triggers() -> Vec<TriggerDef> {
+    vec![
+        // Every level-up grants a bonus skill point and announces the milestone.
+        // `level: 0` is the designer's "any level" sentinel the sim treats as a wildcard.
+        TriggerDef {
+            id: TriggerId::new("trigger.levelup_reward"),
+            name: "Level-Up Reward".into(),
+            on: GameTrigger::OnLevelUp { level: 0 },
+            conditions: vec![TriggerCondition::Always],
+            actions: vec![
+                RuleAction::GrantSkillPoints { n: 1 },
+                RuleAction::Broadcast { message: "You have grown in power!".into() },
+            ],
+            once_per_player: false,
+        },
+        // Kills have a chance to spill a common loot cache at the corpse.
+        TriggerDef {
+            id: TriggerId::new("trigger.kill_loot"),
+            name: "Spoils of War".into(),
+            on: GameTrigger::OnKill,
+            conditions: vec![TriggerCondition::Chance { p: 0.3 }],
+            actions: vec![RuleAction::SpawnLoot { table: LootTableId::new("loot.common") }],
+            once_per_player: false,
+        },
+        // Stepping into the hollows summons a guardian wave to greet the intruder.
+        TriggerDef {
+            id: TriggerId::new("trigger.hollows_guardian"),
+            name: "Hollows Guardian".into(),
+            on: GameTrigger::OnZoneEnter { zone_tag: "hollows".into() },
+            conditions: vec![TriggerCondition::InBiome { name: "hollows".into() }],
+            actions: vec![
+                RuleAction::SpawnMob { mob: MobId::new("mob.void_wraith"), count: 3 },
+                RuleAction::Broadcast { message: "The hollows stir...".into() },
+            ],
+            once_per_player: false,
+        },
+        // Casting Fireball sometimes empowers the caster — a fire-synergy mark that
+        // rewards leaning into the pyromancy fantasy.
+        TriggerDef {
+            id: TriggerId::new("trigger.fire_synergy"),
+            name: "Fire Synergy".into(),
+            on: GameTrigger::OnSpellCast { spell: SpellId::new("spell.fireball") },
+            conditions: vec![TriggerCondition::Chance { p: 0.5 }],
+            actions: vec![RuleAction::ApplyStatus {
+                status: StatusId::new("status.empower"),
+                duration_s: 4.0,
+            }],
+            once_per_player: false,
+        },
+        // The first time a voidcraft-trained mage picks up void essence, reward the
+        // discovery once with a burst of XP.
+        TriggerDef {
+            id: TriggerId::new("trigger.void_initiation"),
+            name: "Void Initiation".into(),
+            on: GameTrigger::OnPickup { item: ItemId::new("item.void_essence") },
+            conditions: vec![TriggerCondition::HasTech { node: TechNodeId::new("tech.arcana_4") }],
+            actions: vec![
+                RuleAction::GrantXp { amount: 250 },
+                RuleAction::Broadcast { message: "The void acknowledges you.".into() },
+            ],
+            once_per_player: true,
+        },
+    ]
+}

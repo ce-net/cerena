@@ -16,7 +16,7 @@
 
 use glam::Vec3;
 
-use arena_content::ids::{MobId, StatusId};
+use arena_content::ids::MobId;
 use arena_content::spell::{EffectOp, Faction, SpellDef, Target};
 use arena_protocol::snapshot::GameEvent;
 use arena_protocol::world::Team;
@@ -189,7 +189,7 @@ fn eval_inner(
             for (id, dist) in hits {
                 // Falloff scales the magnitude from full at the centre to `falloff`
                 // at the edge.
-                let scale = 1.0 - (1.0 - *falloff) * (dist / radius).clamp(0.0, 1.0);
+                let scale = 1.0 - (1.0 - *falloff) * (dist / *radius).clamp(0.0, 1.0);
                 let sub = CastContext {
                     damage_mult: ctx.damage_mult * scale,
                     ..ctx.clone()
