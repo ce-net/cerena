@@ -28,6 +28,7 @@ pub mod entity;
 pub mod input;
 pub mod karma;
 pub mod message;
+pub mod replica;
 pub mod snapshot;
 pub mod weapon;
 pub mod world;

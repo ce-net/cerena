@@ -261,6 +261,14 @@ pub mod topic {
         format!("{}/{}/rpc", session.topic_root(), zone.token())
     }
 
+    /// State-proof gossip plane for a zone (replicated-authority model): every
+    /// replica hosting the zone publishes its periodic [`crate::replica::StateProof`]
+    /// here, and reads peers' proofs to run the quorum merge. Distinct from
+    /// `zone_state`, which carries snapshot-CID advertisements + spectator events.
+    pub fn zone_proof(session: &SessionId, zone: ZoneId) -> String {
+        format!("{}/{}/proof", session.topic_root(), zone.token())
+    }
+
     /// Authority-to-authority control plane for a session.
     pub fn authority(session: &SessionId) -> String {
         format!("{}/authority", session.topic_root())

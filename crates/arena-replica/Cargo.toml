@@ -1,0 +1,18 @@
+[package]
+name = "arena-replica"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic replicated-authority engine: every player's node runs the full zone sim from a shared tick-tagged input log, reconciled by a majority state-hash quorum. Mesh-free and wasm-clean."
+
+[dependencies]
+arena-protocol = { path = "../arena-protocol" }
+arena-sim = { path = "../arena-sim" }
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# Tests build a real World, which needs a content pack to drive the sim.
+arena-content = { path = "../arena-content" }

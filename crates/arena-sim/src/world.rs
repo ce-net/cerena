@@ -131,6 +131,25 @@ pub struct PlayerCheckpoint {
     pub move_runtime: MovementRuntime,
 }
 
+/// A whole-zone, content-addressable snapshot — what a joining or recovering
+/// replica imports to converge with the running ones (the equivalent of
+/// spacegame's `SectorSnapshot`). It captures only **persistent** state: every
+/// player's full progression checkpoint plus the sim clock and id cursor.
+///
+/// Transients (in-flight projectiles, persistent fields, scheduled effects,
+/// summoned mobs, ground loot) are deliberately omitted. They are sub-second,
+/// regenerate from inputs, and — crucially — are excluded from
+/// [`World::state_hash`] too, so a snapshot-seeded replica hashes **identically**
+/// to the long-running ones the instant it is imported, rather than diverging
+/// until the transients clear. `living` is rebuilt fresh on import (it is not
+/// hashed and is largely tick-derived).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoneSnapshot {
+    pub tick: Tick,
+    pub next_id: EntityId,
+    pub players: Vec<PlayerCheckpoint>,
+}
+
 /// A travelling spell projectile carrying its on-impact continuation.
 #[derive(Debug, Clone)]
 struct ProjectileState {
@@ -318,6 +337,13 @@ impl World {
     /// Read-only access to all entities, for the snapshot/replication layer.
     pub fn entities(&self) -> &HashMap<EntityId, EntityState> {
         &self.entities
+    }
+
+    /// The live player entity controlled by `owner`, if present. The replica engine
+    /// uses this to route a tick-tagged input to the right body without keeping its
+    /// own id map (the world is the single source of truth).
+    pub fn player_entity(&self, owner: &NodeId) -> Option<EntityId> {
+        self.entity_of_owner(owner)
     }
 
     pub fn current_tick(&self) -> Tick {
@@ -552,8 +578,38 @@ impl World {
             h.update(e.flags.0.to_le_bytes());
             if let Some(r) = self.rpg.get(&id) {
                 h.update(r.level.to_le_bytes());
+                h.update(r.xp.to_le_bytes());
+                h.update(r.skill_points.to_le_bytes());
                 h.update(q(r.mana).to_le_bytes());
+                h.update(q(r.max_mana).to_le_bytes());
                 h.update(q(r.stamina).to_le_bytes());
+                // Progression is the cheat-critical, persistent state the replicated
+                // quorum must agree on (minted attributes / phantom tech are how a
+                // tampered authority would dupe value), so fold it into the hash.
+                for v in [
+                    r.attributes.power,
+                    r.attributes.focus,
+                    r.attributes.agility,
+                    r.attributes.vitality,
+                ] {
+                    h.update(q(v).to_le_bytes());
+                }
+                let mut tech: Vec<&str> = r.unlocked_tech.iter().map(|t| t.0.as_str()).collect();
+                tech.sort_unstable();
+                for t in tech {
+                    h.update(t.as_bytes());
+                    h.update([0]);
+                }
+            }
+            // Inventory contents (sorted) — a duped stack or forged item shows here.
+            if let Some(inv) = self.inventory.get(&id) {
+                let mut slots: Vec<(&str, u16)> =
+                    inv.slots.iter().map(|(i, q)| (i.0.as_str(), *q)).collect();
+                slots.sort_unstable();
+                for (item, qty) in slots {
+                    h.update(item.as_bytes());
+                    h.update(qty.to_le_bytes());
+                }
             }
             let nstatus = self.statuses.get(&id).map(|s| s.len()).unwrap_or(0) as u32;
             h.update(nstatus.to_le_bytes());
@@ -2499,6 +2555,49 @@ impl World {
     pub fn player_hash(&self, owner: &NodeId) -> Option<[u8; 32]> {
         self.export_player(owner).map(|c| checkpoint_hash(&c))
     }
+
+    /// Set the sim clock directly. The replica engine uses this to start a fresh or
+    /// snapshot-restored world at the shared wall-clock tick, so it only advances the
+    /// elapsed ticks rather than replaying from zero.
+    pub fn set_tick(&mut self, tick: Tick) {
+        self.tick = tick;
+    }
+
+    /// Capture the persistent state of the whole zone (see [`ZoneSnapshot`]). The
+    /// distinct, non-empty owners are visited in sorted order so the produced
+    /// snapshot is deterministic regardless of HashMap iteration order — two honest
+    /// replicas at the same tick produce byte-identical snapshots. Summoned mobs
+    /// (empty owner, tracked in `mobs`) are excluded.
+    pub fn export_snapshot(&self) -> ZoneSnapshot {
+        let mut owners: Vec<&NodeId> = self
+            .entities
+            .iter()
+            .filter(|(id, e)| {
+                e.kind == EntityKind::Player && !e.owner.is_empty() && !self.mobs.contains_key(id)
+            })
+            .map(|(_, e)| &e.owner)
+            .collect();
+        owners.sort_unstable();
+        owners.dedup();
+        let players = owners.into_iter().filter_map(|o| self.export_player(o)).collect();
+        ZoneSnapshot { tick: self.tick, next_id: self.next_id, players }
+    }
+
+    /// Rebuild a world from a [`ZoneSnapshot`] on `map`/`content`, losslessly
+    /// restoring every player via [`World::import_player`]. The result is a live
+    /// authority/replica positioned at the snapshot's tick — call [`World::set_tick`]
+    /// afterwards to fast-forward to the shared wall-clock tick before advancing.
+    pub fn import_snapshot(map: MapDef, content: ContentRegistry, snap: ZoneSnapshot) -> World {
+        let mut world = World::new(map, content);
+        world.tick = snap.tick;
+        for ckpt in snap.players {
+            world.import_player(ckpt);
+        }
+        // Keep the id cursor ahead of every restored entity so new spawns never
+        // collide with an imported id.
+        world.next_id = world.next_id.max(snap.next_id);
+        world
+    }
 }
 
 /// Status-derived movement modifiers.
@@ -2707,6 +2806,50 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_roundtrip_preserves_state_hash() {
+        // A zone serialized to a content-addressed blob and restored on another node
+        // must hash identically — this is what lets a joining/recovering replica
+        // converge with the running ones (the failover + join path).
+        let mut w = world();
+        place(&mut w, "alice", Team::Red, Vec3::new(1.0, STAND_HALF_HEIGHT, 2.0), 0.3);
+        place(&mut w, "bob", Team::Blue, Vec3::new(-3.0, STAND_HALF_HEIGHT, 4.0), -0.7);
+        // Advance so positions/progression are non-trivial.
+        for _ in 0..5 {
+            w.tick();
+        }
+        let before = w.state_hash();
+        let tick = w.current_tick();
+
+        // Round-trip through bincode exactly like the blob custody path.
+        let bytes = bincode::serialize(&w.export_snapshot()).expect("snapshot serializes");
+        let snap: ZoneSnapshot = bincode::deserialize(&bytes).expect("snapshot deserializes");
+        let restored = World::import_snapshot(MapDef::test_arena(), registry(), snap);
+
+        assert_eq!(restored.current_tick(), tick, "tick is preserved");
+        assert_eq!(
+            restored.state_hash(),
+            before,
+            "a restored zone hashes identically to the original"
+        );
+    }
+
+    #[test]
+    fn state_hash_catches_inventory_and_progression_drift() {
+        // The widened hash must notice a duped item or minted xp — the cheat vectors
+        // the replicated quorum exists to catch.
+        let mut a = world();
+        let mut b = world();
+        place(&mut a, "p", Team::Red, Vec3::new(0.0, STAND_HALF_HEIGHT, 0.0), 0.0);
+        place(&mut b, "p", Team::Red, Vec3::new(0.0, STAND_HALF_HEIGHT, 0.0), 0.0);
+        assert_eq!(a.state_hash(), b.state_hash(), "identical spawns hash equal");
+
+        // Mint xp on one replica only.
+        let id = a.entity_of_owner(&"p".to_string()).unwrap();
+        a.rpg.get_mut(&id).unwrap().xp += 10_000;
+        assert_ne!(a.state_hash(), b.state_hash(), "minted xp shows as a divergent hash");
+    }
+
+    #[test]
     fn mana_gate_rejects_empty_mana_cast() {
         let mut w = world();
         let caster = place(&mut w, "a", Team::Red, Vec3::new(0.0, STAND_HALF_HEIGHT, 0.0), 0.0);
@@ -2822,7 +2965,8 @@ mod tests {
 
         let lance2 = w.content.spell(&SpellId::new("spell.arcane_lance")).cloned().unwrap();
         let origin2 = movement::eye_position(&w.entities[&caster]);
-        let evs2 = magic::cast(&mut w, caster, &lance2, origin2, dir, w.current_tick());
+        let now2 = w.current_tick();
+        let evs2 = magic::cast(&mut w, caster, &lance2, origin2, dir, now2);
         let new_dmg = evs2
             .iter()
             .find_map(|e| match e {
