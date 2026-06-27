@@ -27,7 +27,7 @@ pub const AOI_ZONE_RADIUS: i32 = 1;
 
 /// A zone cell coordinate on the horizontal grid. Vertical is not partitioned —
 /// FPS maps are effectively 2.5D for partitioning purposes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ZoneId {
     pub x: i32,
     pub z: i32,

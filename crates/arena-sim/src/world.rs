@@ -687,7 +687,7 @@ impl World {
                 })
                 .unwrap_or(movement::SPRINT_MULT);
 
-            let mut gravity_mult = if sm.levitate { 0.0 } else { 1.0 };
+            let mut gravity_mult: f32 = if sm.levitate { 0.0 } else { 1.0 };
             let airborne = !on_ground_prev;
             let falling = self.entities.get(id).map(|e| e.vel.y < 0.0).unwrap_or(false);
             // Glide: airborne, falling, holding jump, mode unlocked.
@@ -2178,7 +2178,7 @@ impl World {
             damage,
             health_frac,
             dt: arena_protocol::TICK_DT,
-            seed: self.tick.wrapping_mul(0x9E37_79B9).wrapping_add(wearer as u64),
+            seed: (self.tick as u64).wrapping_mul(0x9E37_79B9).wrapping_add(wearer as u64),
         };
         let rt = self.proc_rt.entry(wearer).or_default();
         let outcomes = crate::item_procs::evaluate(&triggers, &ctx, rt);

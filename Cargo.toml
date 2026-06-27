@@ -67,7 +67,8 @@ sha2 = "0.10"
 fastrand = "2"
 
 # Local SDK (mesh transport, identity, economy). Path dep by design.
-ce_rs = { path = "../ce-rs", features = ["serve"] }
+# The package is named `ce-rs`; we import it as `ce_rs`, so rename explicitly.
+ce_rs = { path = "../ce-rs", package = "ce-rs", features = ["serve"] }
 
 [profile.release]
 opt-level = 3

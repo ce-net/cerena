@@ -253,7 +253,7 @@ pub fn reforge(
         })
         .collect();
 
-    let mut rng = ForgeRng::seed(&[seed, inst.id.0, 0xREF0_0000_u64.wrapping_add(inst.upgrade_level as u64)]);
+    let mut rng = ForgeRng::seed(&[seed, inst.id.0, 0x12EF_0000_u64.wrapping_add(inst.upgrade_level as u64)]);
     let budget = inst.rarity.affix_budget() as usize;
     let tier_bias = (magic_find * forge.mf_to_tier) as u32;
     let pool = content.affix_pool(def.slot, &def.affix_tags, ilvl);

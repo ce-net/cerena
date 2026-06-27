@@ -28,11 +28,11 @@ pub async fn run_scale<C: Cluster>(cluster: &mut C, cfg: &E2eConfig) -> Result<S
         cast_rate: 2.0,
         move_speed: 6.0,
     };
-    let gen = LoadGen::new(node_urls, botcfg);
+    let loadgen = LoadGen::new(node_urls, botcfg);
 
     // 2) Ramp + hold.
     let ramp = Duration::from_secs((cfg.players as u64 / 200).max(5));
-    let load = gen.run(cfg.players, ramp, cfg.hold).await?;
+    let load = loadgen.run(cfg.players, ramp, cfg.hold).await?;
 
     // 3) Sample fleet health: tick rate + active zone count from each node's
     //    status/atlas, and whether every authority stayed live.

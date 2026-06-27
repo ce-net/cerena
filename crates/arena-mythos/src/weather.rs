@@ -110,7 +110,7 @@ impl WeatherState {
 
 /// Samples deterministic aetherweather for a zone. Stateless: the sky at any tick is a
 /// pure function of the inputs, so no front needs to be replicated — just recompute.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct AetherWeather {
     /// Per-zone seed (so neighbouring zones have different, but coherent, weather).
     pub zone_seed: u64,
