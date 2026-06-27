@@ -28,7 +28,7 @@ use arena_protocol::auth::SessionId;
 use arena_protocol::entity::EntityState;
 use arena_protocol::input::InputFrame;
 use arena_protocol::message::{topic, Envelope};
-use arena_protocol::replica::{ReplicaInput, ReplicaMsg, SnapshotAd, StateProof, TaggedInput};
+use arena_protocol::replica::{ReplicaInput, ReplicaMsg, SnapshotAd, StateProof};
 use arena_protocol::world::{ZoneId, AOI_ZONE_RADIUS};
 use arena_protocol::{decode, encode, EntityId, NodeId, Tick};
 use arena_replica::{agree, tick_at, Replica, Verdict};

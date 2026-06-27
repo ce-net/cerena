@@ -73,8 +73,6 @@ impl Gpu {
                     label: Some("cerena-device"),
                     required_features: wgpu::Features::empty(),
                     required_limits,
-                    // Hint only; lets the backend pick allocation strategy.
-                    memory_hints: wgpu::MemoryHints::default(),
                 },
                 None,
             )
