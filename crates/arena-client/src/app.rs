@@ -107,6 +107,12 @@ pub struct App {
     accumulator: f32,
     tick_counter: u32,
     last_ping_ms: u64,
+
+    /// Browser hosting: when present (wasm, served through ce-serve), the tab runs the
+    /// authoritative replica engine itself — playing IS hosting — instead of the
+    /// predict-against-a-remote-authority path. `None` falls back to that legacy path.
+    #[cfg(target_arch = "wasm32")]
+    host: Option<crate::host::BrowserHost>,
 }
 
 impl App {
@@ -116,7 +122,34 @@ impl App {
         let event_loop = EventLoop::new().expect("create event loop");
         let window = build_window(&event_loop);
         let gpu = Gpu::new(window.clone()).await;
-        let app = App::new(gpu);
+        #[allow(unused_mut)]
+        let mut app = App::new(gpu);
+
+        // In the browser, connect the hosting engine: this tab becomes a replica of the
+        // zones around the player and reconciles with the rest by the state-hash quorum.
+        #[cfg(target_arch = "wasm32")]
+        {
+            use arena_protocol::auth::SessionId;
+            use arena_protocol::world::ZoneId;
+            let session = SessionId("cerena-dev".to_string());
+            match crate::host::BrowserHost::connect(
+                session,
+                arena_content::default_pack(),
+                1,
+                ZoneId::new(0, 0),
+            )
+            .await
+            {
+                Ok(h) => {
+                    tracing::info!("browser host connected — this tab is now hosting its zones");
+                    app.local_node = h.node_id_string();
+                    app.host = Some(h);
+                    app.joined = true;
+                }
+                Err(e) => tracing::error!("browser host connect failed (is this served via ce-serve?): {e:?}"),
+            }
+        }
+
         run_event_loop(event_loop, window, app);
     }
 
@@ -156,6 +189,8 @@ impl App {
             accumulator: 0.0,
             tick_counter: 0,
             last_ping_ms: 0,
+            #[cfg(target_arch = "wasm32")]
+            host: None,
         }
     }
 
@@ -171,6 +206,14 @@ impl App {
     /// One animation frame: pump net, step fixed-tick input/prediction, update the
     /// camera, and render. `now` is the current local time in ms.
     fn frame(&mut self) {
+        // Browser hosting path: the tab IS the server for its zones. Runs the replica
+        // engine instead of predicting against a remote authority.
+        #[cfg(target_arch = "wasm32")]
+        if self.host.is_some() {
+            self.frame_hosted();
+            return;
+        }
+
         let now = now_ms();
         let dt = ((now.saturating_sub(self.last_ms)) as f32 / 1000.0).min(0.25);
         self.last_ms = now;
@@ -252,6 +295,60 @@ impl App {
 
         // TODO: thread `&self.hud` and `&self.particles` into the renderer's HUD and
         //       VFX passes (the draw flow seams exist in render.rs).
+        self.renderer.render(&entities, &self.camera);
+    }
+
+    /// The browser-hosting frame: sample fixed-tick input and feed it to the local
+    /// replica engine (which broadcasts it so every replica applies it identically),
+    /// advance the hosted zones to the shared wall-clock tick, then render straight from
+    /// the authoritative replica — no prediction/reconciliation, because this tab holds
+    /// real authority, shared by quorum with the other replicas.
+    #[cfg(target_arch = "wasm32")]
+    fn frame_hosted(&mut self) {
+        let now = now_ms();
+        let dt = ((now.saturating_sub(self.last_ms)) as f32 / 1000.0).min(0.25);
+        self.last_ms = now;
+
+        if self.registry.has_pending() {
+            self.hotreload.apply(&mut self.registry, &mut self.renderer);
+        }
+
+        let host = self.host.clone().expect("frame_hosted only runs with a host");
+
+        // Fixed-tick input: one InputFrame per elapsed tick, handed to the engine.
+        self.accumulator += dt;
+        let mut steps = 0;
+        while self.accumulator >= TICK_DT && steps < MAX_CATCHUP_TICKS {
+            self.accumulator -= TICK_DT;
+            steps += 1;
+            self.tick_counter = self.tick_counter.wrapping_add(1);
+            let frame: InputFrame = self.input.end_tick(self.tick_counter);
+            self.hud.set_selected_slot(frame.weapon_slot);
+            host.submit_input(frame);
+        }
+        if steps == MAX_CATCHUP_TICKS {
+            self.accumulator = 0.0;
+        }
+
+        // Advance the hosted replicas (drain peer inputs, step, publish proofs, merge).
+        host.advance();
+
+        // Render straight from the authoritative replica world.
+        let mut entities = host.render_entities();
+        let local_id = host.local_entity().unwrap_or(0);
+        self.local_id = local_id;
+        if let Some(local) = entities.iter().find(|e| e.id == local_id).cloned() {
+            self.camera.follow(&local);
+        }
+        let (yaw, pitch) = self.input.look();
+        self.camera.yaw = yaw;
+        self.camera.pitch = pitch;
+        entities.retain(|e| e.id != local_id);
+
+        self.feedback.update(dt);
+        self.feedback.apply(&mut self.camera);
+        self.particles.update(dt);
+        self.hud.tick(dt);
         self.renderer.render(&entities, &self.camera);
     }
 

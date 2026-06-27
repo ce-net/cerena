@@ -8,7 +8,10 @@
 
 use glam::Vec3;
 
-use arena_protocol::world::{Aabb, MapId, SpawnPoint, Team, WORLD_CEIL_M, WORLD_FLOOR_M};
+use arena_content::worldgen::WorldGenParams;
+use arena_protocol::world::{
+    Aabb, MapId, SpawnPoint, Team, ZoneId, WORLD_CEIL_M, WORLD_FLOOR_M, ZONE_SIZE_M,
+};
 
 /// The compiled, immutable definition of one arena.
 #[derive(Debug, Clone)]
@@ -164,4 +167,69 @@ impl MapDef {
         }
         *best
     }
+}
+
+/// Build a zone's collision geometry from the content worldgen recipe, falling back
+/// to the canonical [`MapDef::test_arena`] if procgen yields nothing.
+///
+/// This is the **single source of truth** for a zone's map: the authoritative server,
+/// a headless replica host, and a browser tab all call it with the same `worldgen`
+/// recipe and `zone`, so every replica seeds a byte-identical [`MapDef`]. Identical
+/// geometry is a precondition for the replicated-authority quorum to converge — two
+/// replicas simulating different terrain would never agree on a state hash. (Lives in
+/// `arena-sim`, not `arena-server`, precisely so the wasm client can share it.)
+///
+/// Server-side we only need a coarse collider (box columns), not the full visible
+/// mesh — see [`arena_procgen::world::generate_zone_collision`]. Spawn points are
+/// synthesised in a ring around the zone centre, lifted just above the highest
+/// central terrain column.
+pub fn build_zone_geometry(worldgen: &WorldGenParams, zone: ZoneId) -> MapDef {
+    let brushes = arena_procgen::world::generate_zone_collision(worldgen, zone);
+    if brushes.is_empty() {
+        // Degenerate recipe (e.g. an empty/dev pack): fall back to the sealed test arena.
+        return MapDef::test_arena();
+    }
+
+    let center = zone.center();
+    // Approximate ground height near the centre from the tallest central column.
+    let mut ground_y = WORLD_FLOOR_M;
+    let quarter = ZONE_SIZE_M * 0.25;
+    for b in &brushes {
+        let c = b.center();
+        if (c.x - center.x).abs() < quarter && (c.z - center.z).abs() < quarter {
+            ground_y = ground_y.max(b.max.y);
+        }
+    }
+
+    // A small ring of spawns, alternating teams, just above the surface.
+    let offsets = [
+        (-16.0, -16.0),
+        (16.0, -16.0),
+        (-16.0, 16.0),
+        (16.0, 16.0),
+        (0.0, -24.0),
+        (0.0, 24.0),
+        (-24.0, 0.0),
+        (24.0, 0.0),
+    ];
+    let mut spawns = Vec::with_capacity(offsets.len());
+    for (i, (dx, dz)) in offsets.into_iter().enumerate() {
+        let team = if i % 2 == 0 { Team::Red } else { Team::Blue };
+        spawns.push(SpawnPoint {
+            pos: Vec3::new(center.x + dx, ground_y + 0.1, center.z + dz),
+            yaw: 0.0,
+            team,
+        });
+    }
+
+    let bounds = Aabb::new(
+        Vec3::new(zone.x as f32 * ZONE_SIZE_M, WORLD_FLOOR_M, zone.z as f32 * ZONE_SIZE_M),
+        Vec3::new(
+            (zone.x + 1) as f32 * ZONE_SIZE_M,
+            WORLD_CEIL_M,
+            (zone.z + 1) as f32 * ZONE_SIZE_M,
+        ),
+    );
+
+    MapDef { id: MapId(format!("zone_{}", zone.token())), bounds, brushes, spawns }
 }

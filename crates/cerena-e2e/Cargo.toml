@@ -26,4 +26,5 @@ hex.workspace = true
 fastrand.workspace = true
 
 [dev-dependencies]
-tracing-subscriber = "0.3"
+# `with_env_filter` lives behind the env-filter feature.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -10,6 +10,7 @@ description = "The authoritative zone server: runs the sim, owns AOI snapshots, 
 [dependencies]
 arena-protocol = { path = "../arena-protocol" }
 arena-sim = { path = "../arena-sim" }
+arena-replica = { path = "../arena-replica" }
 arena-net = { path = "../arena-net" }
 arena-karma = { path = "../arena-karma" }
 arena-mesh = { path = "../arena-mesh" }

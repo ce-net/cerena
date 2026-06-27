@@ -77,9 +77,11 @@ pub mod config;
 pub mod coordinator;
 pub mod handler;
 pub mod manager;
+pub mod replica_host;
 pub mod replication;
 pub mod server;
 pub mod zone;
 
 pub use config::ServerConfig;
+pub use replica_host::ReplicaHost;
 pub use server::ArenaServer;

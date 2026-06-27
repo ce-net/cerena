@@ -1,0 +1,35 @@
+# Cerena — a 10k-player procedural mage RPG whose authoritative simulation runs ON the
+# CE mesh. Players host their own zones in the browser (served via ce-serve); this ceapp
+# is the OPTIONAL headless donor: install it through `ce app` and your node contributes
+# compute by hosting zones as a replica (the same arena-replica engine the browser runs),
+# keeping the open world alive and the proximity-replicated save durable when players come
+# and go. Run target: `arena-server --replica-host --session <id> --zone x,z ...`.
+[app]
+name    = "cerena"
+version = "0.1.0"
+summary = "Procedural mage RPG hosted by its players; this app donates compute as a headless zone replica"
+runtime = "native"
+publisher = "c0be11e0ce0aaa769da6f9970244947d3d32a0c0d8302fb5f41f73d7950be456"
+
+[native]
+bin = "arena-server"
+# The supervisor runs the donor in replica-host mode (everyone-hosts), not as a legacy
+# single authority. Zones default to (0,0); an operator can widen the hosted set.
+args = ["--replica-host", "--session", "cerena-dev"]
+
+[native.artifacts]
+"darwin-amd64" = "PLACEHOLDER_darwin_amd64"
+"darwin-arm64" = "PLACEHOLDER_darwin_arm64"
+"linux-amd64"  = "PLACEHOLDER_linux_amd64"
+"linux-arm64"  = "PLACEHOLDER_linux_arm64"
+
+[sandbox]
+# Native host app: talks to the LOCAL node over loopback, ce-cap-gates inbound mesh
+# traffic in Rust (arena-mesh ticket/capability checks). NOT a gVisor jail.
+tier       = "none"
+net        = "loopback"
+capability = "inherit"
+
+# The player-facing FRONTEND is a separate, content-addressed web bundle (cerena/web,
+# built by web/build.sh) served through ce-serve, NOT this native ceapp. ce-serve injects
+# the window.__ceNode mesh bridge so each tab becomes a hosting replica.

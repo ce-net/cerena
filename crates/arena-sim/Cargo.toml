@@ -11,6 +11,9 @@ description = "Deterministic fixed-timestep FPS simulation: movement, collision,
 arena-protocol = { path = "../arena-protocol" }
 arena-content = { path = "../arena-content" }
 arena-mythos = { path = "../arena-mythos" }
+# For build_zone_geometry: turn the content worldgen recipe into a zone's collider.
+# arena-procgen depends only on protocol+content, so this is acyclic.
+arena-procgen = { path = "../arena-procgen" }
 glam.workspace = true
 serde.workspace = true
 tracing.workspace = true

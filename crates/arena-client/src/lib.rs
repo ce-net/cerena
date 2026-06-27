@@ -48,6 +48,10 @@ pub mod feedback;
 pub mod gpu;
 pub mod hotreload;
 pub mod hud;
+/// Browser hosting: the tab runs the shared replica engine for its area of interest,
+/// so playing IS hosting (wasm only — it reaches the mesh via the ce-serve bridge).
+#[cfg(target_arch = "wasm32")]
+pub mod host;
 pub mod input;
 pub mod mesh_gpu;
 pub mod net;

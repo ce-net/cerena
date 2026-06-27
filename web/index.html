@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<!-- The client reaches the mesh through this page's origin via the ce-serve bridge
+     (window.__ceNode, injected by ce-serve). Each tab runs the authoritative replica
+     engine for the zones around the player — playing IS hosting. wasm-unsafe-eval is
+     required to instantiate the WebAssembly module; wss:/https: lets the bridge reach
+     relays. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: https:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; base-uri 'none'" />
+<title>Cerena — a procedural mage RPG hosted by its players</title>
+<meta name="theme-color" content="#0a0612" />
+<style>
+  html,body{margin:0;height:100%;background:#0a0612;color:#ece6f6;overflow:hidden;
+    font-family:system-ui,sans-serif;touch-action:none}
+  #cerena-canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
+  #boot{position:fixed;inset:0;display:grid;place-items:center;z-index:5;pointer-events:none}
+  #boot .b{font-family:ui-monospace,monospace;font-size:13px;color:#c79bff;
+    background:rgba(16,10,28,.82);border:1px solid rgba(160,116,255,.2);
+    border-radius:10px;padding:10px 16px}
+  #hud{position:fixed;inset:0;pointer-events:none;z-index:4;
+    font:13px/1.4 ui-monospace,monospace;color:#d8c8f6;text-shadow:0 1px 3px rgba(0,0,0,.7)}
+  #hud .tl{position:absolute;left:14px;top:12px}
+  #hud .tl .t{font-size:15px;letter-spacing:2px;color:#c79bff}
+  #hud .br{position:absolute;right:14px;bottom:14px;text-align:right;color:#9a86b8;font-size:12px}
+</style>
+</head>
+<body>
+<canvas id="cerena-canvas"></canvas>
+<div id="hud">
+  <div class="tl"><div class="t">CERENA</div><div id="hud-status">connecting to the mesh…</div></div>
+  <div class="br"><div>WASD move &middot; mouse aim &middot; click to fire &middot; space jump</div></div>
+</div>
+<div id="boot"><div class="b" id="bootmsg">booting wasm + wgpu…</div></div>
+
+<!-- The wasm-bindgen glue (emitted by wasm-pack into ./pkg/) boots the Rust client. It
+     lives in an external module so the strict `script-src 'self'` CSP (which blocks inline
+     scripts) allows it. The ?v= token cache-busts the matched glue+wasm pair per build. -->
+<script type="module" src="./boot.js?v=__CERENAV__"></script>
+</body>
+</html>

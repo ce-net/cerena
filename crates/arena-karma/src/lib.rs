@@ -66,9 +66,11 @@
 pub mod crossval;
 pub mod detector;
 pub mod ledger;
+pub mod quorum_audit;
 pub mod reports;
 
 pub use crossval::{CrossValidator, Verdict};
 pub use detector::{CheatDetector, SuspicionScore};
 pub use ledger::KarmaLedger;
+pub use quorum_audit::{QuorumAuditor, QuorumVerdict};
 pub use reports::ReportAggregator;

@@ -16,6 +16,7 @@ arena-protocol = { path = "../arena-protocol" }
 arena-server = { path = "../arena-server" }
 arena-mesh = { path = "../arena-mesh" }
 arena-karma = { path = "../arena-karma" }
+arena-content = { path = "../arena-content" }
 ce_rs.workspace = true
 tokio.workspace = true
 tracing.workspace = true

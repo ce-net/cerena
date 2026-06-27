@@ -35,6 +35,11 @@ struct Args {
     e2e_admin: bool,
     e2e_cheat: bool,
     tick_hz: u32,
+    /// Run as a headless replica host (the forward "everyone hosts" model) instead of
+    /// the legacy single-authority server.
+    replica_host: bool,
+    /// Zones to host in replica mode, as `x,z` pairs (repeat `--zone`). Defaults to (0,0).
+    zones: Vec<(i32, i32)>,
 }
 
 impl Default for Args {
@@ -50,6 +55,8 @@ impl Default for Args {
             e2e_admin: false,
             e2e_cheat: false,
             tick_hz: arena_protocol::TICK_HZ,
+            replica_host: false,
+            zones: Vec::new(),
         }
     }
 }
@@ -82,6 +89,16 @@ fn parse_args() -> Result<Args, String> {
             "--e2e-cheat" => args.e2e_cheat = true,
             "--tick-hz" => {
                 args.tick_hz = value()?.parse().map_err(|e| format!("--tick-hz: {e}"))?
+            }
+            "--replica-host" => args.replica_host = true,
+            "--zone" => {
+                let v = value()?;
+                let (x, z) = v
+                    .split_once(',')
+                    .ok_or_else(|| format!("--zone expects 'x,z', got {v}"))?;
+                let x: i32 = x.trim().parse().map_err(|e| format!("--zone x: {e}"))?;
+                let z: i32 = z.trim().parse().map_err(|e| format!("--zone z: {e}"))?;
+                args.zones.push((x, z));
             }
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown flag: {other}")),
@@ -118,6 +135,8 @@ OPTIONS:
     --e2e-admin         TEST ONLY: enable the test admin surface
     --e2e-cheat         TEST ONLY: act as a malicious authority (wrong state hash)
     --tick-hz <n>       simulation tick rate (default: 64)
+    --replica-host      run as a headless replica host (everyone-hosts model)
+    --zone <x,z>        zone to host in replica mode (repeatable; default 0,0)
 ";
 
 #[tokio::main(flavor = "multi_thread")]
@@ -138,6 +157,12 @@ async fn main() -> ExitCode {
     if let Some(bootstrap) = &args.bootstrap {
         // The CE node handles its own bootstrap; we only note it for operator clarity.
         eprintln!("arena-server: note: --bootstrap {bootstrap} is a CE-node concern and is ignored here");
+    }
+
+    // The forward "everyone hosts" path: run the shared replica engine headless,
+    // exactly as a browser tab does, over the local CE node.
+    if args.replica_host {
+        return run_replica_host(&args, &api_url).await;
     }
 
     let config = ServerConfig {
@@ -178,6 +203,60 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("arena-server: exited with error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Run the headless replica host: build the shared replica engine over the local CE
+/// node and host the requested zones until ctrl_c.
+async fn run_replica_host(args: &Args, api_url: &str) -> ExitCode {
+    use arena_content::default_pack;
+    use arena_mesh::MeshTransport;
+    use arena_protocol::world::ZoneId;
+    use arena_server::ReplicaHost;
+    use ce_rs::CeClient;
+
+    let token = token_from_data_dir(&args.data_dir).or_else(ce_rs::discover_api_token);
+    let transport = MeshTransport::new(CeClient::with_token(api_url.to_string(), token));
+
+    let me = match transport.node_id().await {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("arena-server: replica-host could not reach the local CE node at {api_url}: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let zones: Vec<ZoneId> = if args.zones.is_empty() {
+        vec![ZoneId::new(0, 0)]
+    } else {
+        args.zones.iter().map(|&(x, z)| ZoneId::new(x, z)).collect()
+    };
+
+    eprintln!(
+        "arena-server: replica-host up\n  node:    {}\n  session: {}\n  zones:   {}\n  api:     {}",
+        me,
+        args.session,
+        zones.iter().map(|z| z.token()).collect::<Vec<_>>().join(" "),
+        api_url,
+    );
+
+    let host = ReplicaHost::new(
+        transport,
+        SessionId(args.session.clone()),
+        me,
+        default_pack(),
+        1,
+        3,
+    );
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    match host.run(zones, shutdown).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("arena-server: replica-host exited with error: {e:#}");
             ExitCode::FAILURE
         }
     }

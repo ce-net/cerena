@@ -68,3 +68,29 @@ pub struct StateProof {
     pub tick: Tick,
     pub hash: [u8; 32],
 }
+
+/// A custodian's advertisement that it has stored a content-addressed whole-zone
+/// snapshot (a `bincode(arena_sim::ZoneSnapshot)` blob put to the CE object store)
+/// for `zone` at `tick`. A node joining the zone, or one out-voted by the quorum,
+/// fetches `cid` via `ce_rs::get_object` and imports it to converge. Published on
+/// the zone's `/state` topic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotAd {
+    pub zone: ZoneId,
+    pub tick: Tick,
+    /// The CE object CID of the snapshot blob.
+    pub cid: String,
+}
+
+/// The replicated-authority traffic carried inside an [`crate::message::Envelope`]
+/// so it rides the same mesh transport as the rest of the protocol. The author of
+/// every variant is the authenticated mesh sender.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ReplicaMsg {
+    /// A tick-tagged input on a zone's `/in` topic.
+    Input(TaggedInput),
+    /// A periodic state-hash proof on a zone's `/proof` topic.
+    Proof(StateProof),
+    /// A snapshot-availability advert on a zone's `/state` topic.
+    Snapshot(SnapshotAd),
+}

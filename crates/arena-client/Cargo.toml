@@ -18,8 +18,11 @@ arena-procgen = { path = "../arena-procgen" }
 arena-assets = { path = "../arena-assets" }
 arena-sim = { path = "../arena-sim" }
 arena-net = { path = "../arena-net" }
+arena-replica = { path = "../arena-replica" }
 glam.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
 bytemuck.workspace = true
 wgpu = "0.20"
 winit = "0.29"

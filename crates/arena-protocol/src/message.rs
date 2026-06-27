@@ -217,6 +217,10 @@ pub enum Envelope {
     Client(ClientMsg),
     Server(ServerMsg),
     Authority(AuthorityMsg),
+    /// Replicated-authority traffic (tick-tagged inputs, state proofs, snapshot
+    /// adverts) — what every replica of a zone, browser or headless, exchanges so
+    /// the players present ARE the servers. See [`crate::replica`].
+    Replica(crate::replica::ReplicaMsg),
 }
 
 impl Envelope {
