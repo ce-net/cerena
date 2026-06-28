@@ -191,17 +191,15 @@ pub fn build_zone_geometry(worldgen: &WorldGenParams, zone: ZoneId) -> MapDef {
     }
 
     let center = zone.center();
-    // Approximate ground height near the centre from the tallest central column.
-    let mut ground_y = WORLD_FLOOR_M;
-    let quarter = ZONE_SIZE_M * 0.25;
-    for b in &brushes {
-        let c = b.center();
-        if (c.x - center.x).abs() < quarter && (c.z - center.z).abs() < quarter {
-            ground_y = ground_y.max(b.max.y);
-        }
-    }
 
-    // A small ring of spawns, alternating teams, just above the surface.
+    // A small ring of spawns, alternating teams. Each spawn's feet are placed on the
+    // terrain surface AT ITS OWN (x, z) — not at the zone centre's height — because the
+    // procedural surface rolls, so a single centre height drops the outer spawns inside
+    // or under the hillside (you then spawn looking out through the back-culled terrain:
+    // a near-empty "all sky" view). A small upward clearance absorbs any render-vs-
+    // collision rounding so feet never start below the visible ground; gravity settles
+    // the tiny gap on the first ticks.
+    const SPAWN_CLEARANCE_M: f32 = 0.5;
     let offsets = [
         (-16.0, -16.0),
         (16.0, -16.0),
@@ -215,8 +213,10 @@ pub fn build_zone_geometry(worldgen: &WorldGenParams, zone: ZoneId) -> MapDef {
     let mut spawns = Vec::with_capacity(offsets.len());
     for (i, (dx, dz)) in offsets.into_iter().enumerate() {
         let team = if i % 2 == 0 { Team::Red } else { Team::Blue };
+        let (sx, sz) = (center.x + dx, center.z + dz);
+        let feet_y = arena_procgen::world::surface_height(worldgen, sx, sz) + SPAWN_CLEARANCE_M;
         spawns.push(SpawnPoint {
-            pos: Vec3::new(center.x + dx, ground_y + 0.1, center.z + dz),
+            pos: Vec3::new(sx, feet_y, sz),
             yaw: 0.0,
             team,
         });

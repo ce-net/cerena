@@ -113,7 +113,31 @@ pub struct App {
     /// predict-against-a-remote-authority path. `None` falls back to that legacy path.
     #[cfg(target_arch = "wasm32")]
     host: Option<crate::host::BrowserHost>,
+
+    /// Hosted-render bookkeeping: the zones whose terrain is already resident on the
+    /// GPU. Each hosted frame uploads at most one not-yet-resident zone (local zone
+    /// first), so the terrain streams in instead of freezing the first frames.
+    #[cfg(target_arch = "wasm32")]
+    uploaded_zones: std::collections::HashSet<(i32, i32)>,
+
+    /// Free-running hosted-frame counter, used to throttle the periodic re-join.
+    #[cfg(target_arch = "wasm32")]
+    frame_count: u32,
 }
+
+/// Surface-extraction grid resolution per zone axis for the visible terrain. A balance
+/// between terrain fidelity and the cost of the one-off CPU extraction at boot / each
+/// time the player crosses into a new area of interest.
+// Kept moderate on purpose: terrain is extracted on the main thread when the area of
+// interest changes (9 zones at boot), so res^3 field evals must stay snappy on a
+// browser. 48 booted smoothly across test hardware; higher (64) added a multi-second
+// hitch. Revisit once extraction moves to a worker.
+#[cfg(target_arch = "wasm32")]
+const TERRAIN_RES: usize = 48;
+
+/// Surface-extraction resolution for the shared player-avatar mesh. Built once at
+/// start-up (not per frame), so this can be comfortably fine without a runtime cost.
+const ENTITY_MESH_RES: usize = 22;
 
 impl App {
     /// Build and run the client: window + gpu bring-up, then the event loop.
@@ -155,7 +179,18 @@ impl App {
 
     /// Assemble the client around an initialised [`Gpu`].
     fn new(gpu: Gpu) -> App {
-        let renderer = Renderer::new(gpu);
+        let mut renderer = Renderer::new(gpu);
+
+        // Build the one shared player-avatar mesh and make it resident. Without this
+        // the renderer has no entity geometry, so every player, mob, projectile and
+        // pickup the sim spawns is invisible — the world looks empty even when the
+        // backend is fully populated. The mesh is grown procedurally (matched to the
+        // sim's collision capsule) once at start-up; per-entity colour/scale comes
+        // from the instance tint in `render.rs`, not the mesh.
+        let avatar = arena_procgen::creature::player_mesh(ENTITY_MESH_RES);
+        let avatar_gpu =
+            crate::mesh_gpu::GpuMesh::upload(&renderer.gpu.device, &avatar);
+        renderer.set_entity_mesh(avatar_gpu);
 
         // Start with an empty content registry; the real pack is fetched on the
         // first ContentVersion. The map is the bundled test arena until join.
@@ -191,6 +226,10 @@ impl App {
             last_ping_ms: 0,
             #[cfg(target_arch = "wasm32")]
             host: None,
+            #[cfg(target_arch = "wasm32")]
+            uploaded_zones: std::collections::HashSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            frame_count: 0,
         }
     }
 
@@ -330,8 +369,32 @@ impl App {
             self.accumulator = 0.0;
         }
 
+        // Make sure we actually have a body in the world. Re-issued until the spawn
+        // takes (throttled so we don't spam the zone while the Join's INPUT_DELAY ticks
+        // elapse), then a no-op for the rest of the session.
+        if self.frame_count % 20 == 0 {
+            host.ensure_joined();
+        }
+
         // Advance the hosted replicas (drain peer inputs, step, publish proofs, merge).
         host.advance();
+
+        // Stream the visible terrain in one zone per frame. The host seeds its zones
+        // asynchronously (after the first mesh round-trips) and the local zone is
+        // extracted first, so the world appears almost immediately and the neighbours
+        // fill in over the next frames — instead of one multi-second extraction of all
+        // nine zones that froze the frame loop (and starved the spawn). Extracting just
+        // the missing zone each frame keeps every frame responsive.
+        for zone in host.hosted_zones_local_first() {
+            if self.uploaded_zones.insert((zone.x, zone.z)) {
+                let mesh = host.zone_render_mesh(zone, TERRAIN_RES);
+                if !mesh.is_empty() {
+                    self.renderer.push_world_mesh(&mesh);
+                    tracing::info!("uploaded terrain for zone {},{}", zone.x, zone.z);
+                }
+                break; // at most one heavy extraction per frame
+            }
+        }
 
         // Render straight from the authoritative replica world.
         let mut entities = host.render_entities();
@@ -339,6 +402,16 @@ impl App {
         self.local_id = local_id;
         if let Some(local) = entities.iter().find(|e| e.id == local_id).cloned() {
             self.camera.follow(&local);
+        }
+        // Reflect the authoritative state into the page HUD a few times a second, so
+        // the frontend overlay tracks the backend (health, position, nearby players)
+        // without flooding the DOM every animation frame.
+        if self.frame_count % 6 == 0 {
+            host.publish_hud();
+        }
+        self.frame_count = self.frame_count.wrapping_add(1);
+        if self.frame_count % 180 == 0 {
+            tracing::info!("MP zones={} entities={} local_id={}", host.hosted_zone_count(), entities.len(), local_id);
         }
         let (yaw, pitch) = self.input.look();
         self.camera.yaw = yaw;

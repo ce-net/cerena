@@ -110,6 +110,54 @@ pub fn generate_creature_mesh(mob: &MobDef, res: usize) -> Mesh {
     mesh
 }
 
+/// Grow the mesh for a **player avatar**, in the exact local space the renderer and
+/// the sim's collision capsule share: the body is centred on the entity's `pos`
+/// (the capsule centre), Y-up, total height `2 * STAND_HALF_HEIGHT` (1.8 m) and
+/// `PLAYER_RADIUS` (0.4 m) thick — see `arena_sim::movement`. Keeping the visual
+/// hull matched to the collision hull means a remote player's body is drawn where it
+/// actually is hit, so what you see is what you shoot.
+///
+/// Unlike a mob, every player shares one silhouette (a smooth capsule torso with a
+/// perched head), so the result is seed-free and built once at client start; the
+/// per-player team colour comes from the renderer's instance tint, not the mesh, so
+/// the vertices are left white. `res` is the Surface Nets grid resolution.
+pub fn player_mesh(res: usize) -> Mesh {
+    // Capsule centre at the origin. Spine endpoints sit `radius` in from each cap so
+    // the total height is exactly 1.8 m (`hh` above and below centre).
+    let hh = 0.9_f32; // STAND_HALF_HEIGHT
+    let r = 0.4_f32; // PLAYER_RADIUS
+    let spine = (hh - r).max(0.0); // 0.5
+    let torso = Part::Capsule {
+        a: Vec3::new(0.0, -spine, 0.0),
+        b: Vec3::new(0.0, spine * 0.6, 0.0),
+        radius: r,
+    };
+    // A head perched just under the top of the capsule, so the silhouette reads as a
+    // figure rather than a pill. Kept inside the capsule's height so it never pokes
+    // past the collision hull.
+    let head = Part::Sphere {
+        center: Vec3::new(0.0, hh - 0.32, 0.0),
+        radius: 0.3,
+    };
+    let parts = [torso, head];
+
+    let blend = 0.16;
+    let body = move |p: Vec3| -> f32 {
+        let mut d = f32::INFINITY;
+        for part in &parts {
+            d = op_union_smooth(d, part.distance(p), blend);
+        }
+        d
+    };
+    // A touch of displacement so the surface isn't a sterile primitive — but far less
+    // than a mob's, to keep the humanoid silhouette clean.
+    let field = displaced(body, 0.02, 5.0, 0x9173_0A5E);
+
+    // Bounds enclose the 1.8 m-tall body plus the head and displacement margin.
+    let bounds = Aabb::new(Vec3::new(-0.7, -1.1, -0.7), Vec3::new(0.7, 1.1, 0.7));
+    surface_nets(&field, bounds, res, 0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +184,21 @@ mod tests {
         let mesh = generate_creature_mesh(&test_mob(0x1234, 1.0), 24);
         assert!(!mesh.is_empty(), "a creature body should produce geometry");
         assert!(mesh.tri_count() > 0);
+    }
+
+    #[test]
+    fn player_mesh_is_non_empty_and_capsule_sized() {
+        let mesh = player_mesh(20);
+        assert!(!mesh.is_empty(), "the player avatar should produce geometry");
+        // The body must fit inside the collision hull it represents: 1.8 m tall,
+        // 0.4 m radius, centred on the origin (allow a small displacement margin).
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for p in &mesh.positions {
+            lo = lo.min(p[1]);
+            hi = hi.max(p[1]);
+            assert!(p[0].abs() < 0.55 && p[2].abs() < 0.55, "body wider than the capsule");
+        }
+        assert!(lo > -1.05 && hi < 1.05, "body taller than the capsule");
     }
 
     #[test]

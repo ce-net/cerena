@@ -292,6 +292,31 @@ impl Renderer {
         self.world_meshes = meshes;
     }
 
+    /// Upload a set of CPU procgen meshes (one per hosted zone) and make them the
+    /// resident terrain. This is the seam the hosted client uses each time its area of
+    /// interest changes — the heavy surface extraction happens upstream on the CPU; here
+    /// we only move the finished vertices/indices onto the GPU.
+    pub fn upload_world_meshes(&mut self, meshes: &[arena_procgen::mesh::Mesh]) {
+        self.world_meshes = meshes
+            .iter()
+            .map(|m| GpuMesh::upload(&self.gpu.device, m))
+            .collect();
+    }
+
+    /// Upload one procgen zone mesh and append it to the resident terrain (the rest is
+    /// left intact). The hosted client uses this to stream terrain in one zone per
+    /// frame, so the world appears progressively instead of in a single multi-second
+    /// extraction hitch that would stall the first frames (and the player's spawn).
+    pub fn push_world_mesh(&mut self, mesh: &arena_procgen::mesh::Mesh) {
+        self.world_meshes.push(GpuMesh::upload(&self.gpu.device, mesh));
+    }
+
+    /// Drop all resident terrain (used when the hosted area of interest changes and the
+    /// terrain must be rebuilt from scratch).
+    pub fn clear_world_meshes(&mut self) {
+        self.world_meshes.clear();
+    }
+
     /// Replace the entity capsule/creature mesh.
     pub fn set_entity_mesh(&mut self, mesh: GpuMesh) {
         self.entity_mesh = Some(mesh);

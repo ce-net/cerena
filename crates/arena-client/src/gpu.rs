@@ -39,10 +39,22 @@ impl Gpu {
         // layout settles); the surface must be configured with a non-zero extent.
         let size = (phys.width.max(1), phys.height.max(1));
 
-        // On wasm we want the GL backend available as a fallback; on native we let
-        // wgpu pick the platform-best (Vulkan/Metal/DX12). PRIMARY | GL covers both.
+        // Backend selection differs by platform. On native we let wgpu pick the
+        // platform-best (Vulkan/Metal/DX12); PRIMARY | GL covers all of them.
+        //
+        // On wasm we force the **WebGL2** backend rather than WebGPU. wgpu 0.20's
+        // device request sends the `maxInterStageShaderComponents` limit, which the
+        // current WebGPU spec removed — Chrome 1xx rejects `requestDevice` with
+        // "limit ... is not recognized", so the WebGPU path fails on up-to-date
+        // browsers. WebGL2 sidesteps that entirely and is universally supported
+        // (Chrome/Firefox/Safari/Edge), and the renderer is already written to stay
+        // within `downlevel_webgl2` limits, so we lose nothing portable by using it.
+        #[cfg(target_arch = "wasm32")]
+        let backends = wgpu::Backends::GL;
+        #[cfg(not(target_arch = "wasm32"))]
+        let backends = wgpu::Backends::PRIMARY | wgpu::Backends::GL;
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY | wgpu::Backends::GL,
+            backends,
             ..Default::default()
         });
 

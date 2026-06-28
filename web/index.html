@@ -23,15 +23,49 @@
     font:13px/1.4 ui-monospace,monospace;color:#d8c8f6;text-shadow:0 1px 3px rgba(0,0,0,.7)}
   #hud .tl{position:absolute;left:14px;top:12px}
   #hud .tl .t{font-size:15px;letter-spacing:2px;color:#c79bff}
+  #hud .tl #hud-peers{color:#9a86b8;font-size:12px;min-height:1em}
   #hud .br{position:absolute;right:14px;bottom:14px;text-align:right;color:#9a86b8;font-size:12px}
+  /* Vitals: stacked health + armor bars, bottom-left. Widths are driven from the
+     authoritative entity by the wasm host (ch_hud). */
+  #hud .bl{position:absolute;left:14px;bottom:14px;width:240px}
+  #hud .row{display:flex;align-items:center;gap:8px;margin-top:6px}
+  #hud .row .k{width:14px;color:#c79bff;font-size:12px}
+  #hud .track{position:relative;flex:1;height:10px;border-radius:6px;
+    background:rgba(20,12,34,.7);border:1px solid rgba(160,116,255,.25);overflow:hidden}
+  #hud .fill{position:absolute;inset:0;width:100%;border-radius:6px;
+    transition:width .18s ease-out}
+  #hp-fill{background:linear-gradient(90deg,#ff5d73,#ff9bae)}
+  #ar-fill{background:linear-gradient(90deg,#5db6ff,#9bd6ff)}
+  #hud #hp-label{width:30px;text-align:right;font-size:12px;color:#ece6f6}
+  #hud #hud-coord{position:absolute;right:14px;top:12px;color:#7d6e9a;font-size:11px}
+  /* Crosshair: a small dot for the first-person aim (click to fire). */
+  #crosshair{position:fixed;left:50%;top:50%;width:6px;height:6px;margin:-3px 0 0 -3px;
+    z-index:4;border-radius:50%;background:rgba(236,230,246,.85);
+    box-shadow:0 0 4px rgba(0,0,0,.8);pointer-events:none}
+  /* Death overlay, toggled by ch_hud. */
+  #dead{position:fixed;inset:0;z-index:6;display:none;place-items:center;
+    background:rgba(10,6,18,.55);pointer-events:none}
+  #dead .d{font-size:20px;letter-spacing:3px;color:#ff9bae;
+    text-shadow:0 2px 8px rgba(0,0,0,.8)}
 </style>
 </head>
 <body>
 <canvas id="cerena-canvas"></canvas>
+<div id="crosshair"></div>
 <div id="hud">
-  <div class="tl"><div class="t">CERENA</div><div id="hud-status">connecting to the mesh…</div></div>
+  <div class="tl">
+    <div class="t">CERENA</div>
+    <div id="hud-status">connecting to the mesh…</div>
+    <div id="hud-peers"></div>
+  </div>
+  <div id="hud-coord"></div>
+  <div class="bl">
+    <div class="row"><div class="k">HP</div><div class="track"><div id="hp-fill" class="fill"></div></div><div id="hp-label">100</div></div>
+    <div class="row" id="ar-row" style="display:none"><div class="k">AR</div><div class="track"><div id="ar-fill" class="fill"></div></div></div>
+  </div>
   <div class="br"><div>WASD move &middot; mouse aim &middot; click to fire &middot; space jump</div></div>
 </div>
+<div id="dead"><div class="d">YOU HAVE FALLEN</div></div>
 <div id="boot"><div class="b" id="bootmsg">booting wasm + wgpu…</div></div>
 
 <!-- The wasm-bindgen glue (emitted by wasm-pack into ./pkg/) boots the Rust client. It

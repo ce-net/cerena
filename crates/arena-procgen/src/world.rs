@@ -48,6 +48,14 @@ fn terrain_height(params: &WorldGenParams, x: f32, z: f32) -> f32 {
     WORLD_FLOOR_M + terrain_height01(params, x, z) * (WORLD_CEIL_M - WORLD_FLOOR_M)
 }
 
+/// The terrain surface height in metres at a world `(x, z)` — the single source of
+/// truth both the render mesh and the collision columns derive from. Spawn placement
+/// uses this so a player's feet land on exactly the visible ground (no spawning
+/// inside or under the terrain). Caves are ignored (this is the macro surface).
+pub fn surface_height(params: &WorldGenParams, x: f32, z: f32) -> f32 {
+    terrain_height(params, x, z)
+}
+
 /// Build the terrain SDF for a zone as a closure borrowing `params`. The field is
 /// negative below the surface (solid), positive above (air), with caves subtracted.
 /// `iso = 0` is the ground surface, and the field increases upward so normals point
@@ -59,6 +67,13 @@ pub fn zone_field<'a>(
     params: &'a WorldGenParams,
     _zone: ZoneId,
 ) -> impl Fn(Vec3) -> f32 + 'a {
+    // Keep this much rock solid immediately below the surface. Caves hollow the
+    // interior but must never carve through the ground to open sky — without this a
+    // region where the cave noise stays above threshold (e.g. around the world origin,
+    // which is the player's home zone) loses its *entire* surface and the zone renders
+    // as empty space (you spawn over a void and see only sky).
+    const CAVE_ROOF_M: f32 = 10.0;
+
     move |p: Vec3| {
         let ty = terrain_height(params, p.x, p.z);
         // Solid below terrain: negative inside, positive above. This is our base SDF.
@@ -72,19 +87,42 @@ pub fn zone_field<'a>(
         let half_span = (WORLD_CEIL_M - WORLD_FLOOR_M) * 0.5;
         let cave_void = (params.cave_threshold - cave01) * half_span;
 
+        // Fade the cave out within CAVE_ROOF_M of the surface: at/above the surface the
+        // void is forced fully positive (no carve), deep down it is the real cave field.
+        // This guarantees a watertight ground while still hollowing the depths.
+        let depth = ty - p.y; // metres below the surface (<=0 above ground)
+        let roof_t = (depth / CAVE_ROOF_M).clamp(0.0, 1.0);
+        let cave_void = cave_void * roof_t + half_span * (1.0 - roof_t);
+
         // Subtract the void from the solid with a smooth lip so cave mouths are round.
         op_subtract_smooth(solid, cave_void, 6.0)
     }
 }
 
-/// The world-space AABB of a zone, from world floor to ceiling.
-fn zone_bounds(zone: ZoneId) -> Aabb {
+/// The tight vertical band a zone's terrain occupies: the full horizontal extent, but
+/// only `[min_relief - below, max_relief + above]` vertically (clamped to the world
+/// floor/ceiling). Concentrating the extraction grid on this slab is what turns the
+/// coarse, slivery full-height extraction into a smooth surface and aligns the render
+/// mesh with the collision heightfield.
+fn terrain_band_bounds(params: &WorldGenParams, zone: ZoneId) -> Aabb {
+    const GRID: usize = 10; // height probes per axis — cheap, just for the min/max
+    const BELOW_M: f32 = 24.0; // headroom under the surface (cave mouths, overhangs)
+    const ABOVE_M: f32 = 8.0; // headroom over the highest relief
+
     let x0 = zone.x as f32 * ZONE_SIZE_M;
     let z0 = zone.z as f32 * ZONE_SIZE_M;
-    Aabb::new(
-        Vec3::new(x0, WORLD_FLOOR_M, z0),
-        Vec3::new(x0 + ZONE_SIZE_M, WORLD_CEIL_M, z0 + ZONE_SIZE_M),
-    )
+    let step = ZONE_SIZE_M / GRID as f32;
+    let (mut hmin, mut hmax) = (f32::INFINITY, f32::NEG_INFINITY);
+    for iz in 0..=GRID {
+        for ix in 0..=GRID {
+            let h = terrain_height(params, x0 + ix as f32 * step, z0 + iz as f32 * step);
+            hmin = hmin.min(h);
+            hmax = hmax.max(h);
+        }
+    }
+    let lo = (hmin - BELOW_M).max(WORLD_FLOOR_M);
+    let hi = (hmax + ABOVE_M).min(WORLD_CEIL_M).max(lo + 1.0);
+    Aabb::new(Vec3::new(x0, lo, z0), Vec3::new(x0 + ZONE_SIZE_M, hi, z0 + ZONE_SIZE_M))
 }
 
 /// Generate the renderable mesh for a zone by extracting its terrain SDF at `res^3`
@@ -93,7 +131,15 @@ fn zone_bounds(zone: ZoneId) -> Aabb {
 /// does not need it.
 pub fn generate_zone_mesh(params: &WorldGenParams, zone: ZoneId, res: usize) -> Mesh {
     let field = zone_field(params, zone);
-    let mut mesh = surface_nets(&field, zone_bounds(zone), res, 0.0);
+    // Extract only the vertical band the terrain actually occupies, not the full
+    // ~320 m floor-to-ceiling box. Sampling the surface height on a coarse grid gives
+    // the min/max relief in this zone; the cubic `res` grid is then spent across that
+    // much thinner slab, so the surface is finely sampled (no slivers) and the render
+    // mesh tracks the `terrain_height`/collision columns closely (so "standing on the
+    // collision ground" == "standing on the visible ground"). A margin below captures
+    // cave mouths; a small margin above leaves headroom for the displaced surface.
+    let bounds = terrain_band_bounds(params, zone);
+    let mut mesh = surface_nets(&field, bounds, res, 0.0);
 
     // Tint each vertex by its biome's fog colour as a cheap base colour. The client
     // overlays the biome's actual surface material on top via triplanar mapping.
@@ -285,5 +331,46 @@ mod tests {
     fn biome_lookup_returns_a_biome() {
         let params = WorldGenParams::default();
         let _ = biome_at(&params, Vec3::new(10.0, 0.0, 20.0));
+    }
+
+    /// Every zone of the *shipped* world — including the origin, the player's home
+    /// zone — must have a watertight ground surface. Regression for the cave field
+    /// carving an entire zone into a void, which left the local zone empty so players
+    /// spawned over nothing and saw only sky.
+    #[test]
+    fn shipped_world_zones_have_terrain() {
+        let wg = arena_content::default_pack().worldgen;
+        for &(zx, zz) in &[(0, 0), (1, 0), (0, 1), (-1, -1), (1, 1)] {
+            let m = generate_zone_mesh(&wg, ZoneId::new(zx, zz), 32);
+            assert!(
+                !m.is_empty(),
+                "zone ({zx},{zz}) produced no terrain — caves opened the surface to sky"
+            );
+        }
+    }
+
+    /// The rendered surface must sit at the height spawns/collision use, so a player
+    /// placed on `surface_height` stands on the visible ground rather than floating
+    /// above it or sinking under it (the "all sky" underground-spawn symptom).
+    #[test]
+    fn render_surface_matches_spawn_height() {
+        let wg = arena_content::default_pack().worldgen;
+        let zone = ZoneId::new(0, 0);
+        let mesh = generate_zone_mesh(&wg, zone, 48);
+        // Sample the tallest render vertex within a small disc around a point and
+        // compare to the analytic surface height the spawn placement uses.
+        let (px, pz) = (48.0_f32, 80.0_f32);
+        let mut top = f32::MIN;
+        for p in &mesh.positions {
+            if (p[0] - px).abs() < 3.0 && (p[2] - pz).abs() < 3.0 {
+                top = top.max(p[1]);
+            }
+        }
+        assert!(top > f32::MIN, "no render geometry near the sample point");
+        let analytic = surface_height(&wg, px, pz);
+        assert!(
+            (top - analytic).abs() < 3.0,
+            "render surface {top:.1} m drifts from spawn height {analytic:.1} m"
+        );
     }
 }

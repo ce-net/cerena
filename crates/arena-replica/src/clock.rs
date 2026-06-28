@@ -14,7 +14,14 @@ pub const TICK_MS: f64 = 1000.0 / TICK_HZ as f64;
 /// A fixed epoch (ms since the Unix epoch) the shared tick clock counts from.
 /// Arbitrary, but it MUST be the same constant on every replica so they all derive
 /// the same tick number from wall-clock time. This is the "shared clock".
-pub const TICK_EPOCH_MS: f64 = 1_700_000_000_000.0;
+///
+/// IMPORTANT: at [`TICK_HZ`] = 64 a `u32` [`Tick`] only spans ~2.1 years, so this epoch
+/// must stay within ~2 years of wall-clock "now" or `tick_at` saturates at `Tick::MAX`
+/// and the simulation freezes (no tick ever advances, so nothing — not even the local
+/// Join — is simulated). The original 2023-11 epoch (1_700_000_000_000) lapsed in early
+/// 2026; this is moved to 2026-05 to restore headroom. The durable fix is to widen
+/// [`Tick`] to `u64` (then the epoch can be permanent); tracked as a follow-up.
+pub const TICK_EPOCH_MS: f64 = 1_780_000_000_000.0;
 
 /// Ticks of input delay: a locally-generated input applies at
 /// `current_tick + INPUT_DELAY` on every replica, giving the network time to deliver

@@ -53,6 +53,14 @@ export async function ch_status() {
 export async function ch_subscribe(topic) {
   await bridge().request('POST', '/mesh/subscribe', { body: { topic: topic } });
 }
+// Subscribe to many topics concurrently (one Promise.all instead of N awaited round
+// trips). Subscribing the whole area of interest sequentially cost ~one relay round
+// trip per topic — tens of seconds before the player could spawn; fanning them out
+// collapses that to a single round trip's latency.
+export async function ch_subscribe_many(topicsJson) {
+  let topics; try { topics = JSON.parse(topicsJson); } catch (e) { return; }
+  await Promise.all(topics.map((t) => bridge().request('POST', '/mesh/subscribe', { body: { topic: t } })));
+}
 export async function ch_publish(topic, hex) {
   await bridge().request('POST', '/mesh/publish', { body: { topic: topic, payload_hex: hex } });
 }
@@ -76,17 +84,37 @@ export function ch_run_inbox(cb) {
     }
   })();
 }
+// Reflect the live, authoritative game state into the page's HUD overlay (the
+// elements in index.html). Called from the host frame loop so the frontend always
+// shows what the backend simulation actually holds — health, position, who is
+// nearby, how many zones this tab is authoritative for — rather than a static label.
+export function ch_hud(json) {
+  let h; try { h = JSON.parse(json); } catch (e) { return; }
+  const txt = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.textContent = v; };
+  const wid = (id, f) => { const el = document.getElementById(id); if (el) el.style.width = (Math.max(0, Math.min(1, f)) * 100).toFixed(1) + '%'; };
+  txt('hud-status', h.status);
+  txt('hp-label', h.hp);
+  wid('hp-fill', h.hp_frac);
+  wid('ar-fill', h.ar_frac);
+  txt('hud-coord', h.coord);
+  txt('hud-peers', h.peers);
+  const dead = document.getElementById('dead');
+  if (dead) dead.style.display = h.dead ? 'grid' : 'none';
+  const ar = document.getElementById('ar-row');
+  if (ar) ar.style.display = (h.ar_frac > 0 ? 'flex' : 'none');
+}
 "#)]
 extern "C" {
     #[wasm_bindgen(catch)]
     async fn ch_status() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch)]
-    async fn ch_subscribe(topic: &str) -> Result<(), JsValue>;
+    async fn ch_subscribe_many(topics_json: &str) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
     async fn ch_publish(topic: &str, hex: &str) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
     async fn ch_get_blob(cid: &str) -> Result<JsValue, JsValue>;
     fn ch_run_inbox(cb: &Closure<dyn FnMut(String)>);
+    fn ch_hud(json: &str);
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -167,10 +195,18 @@ impl BrowserHost {
         epoch: u64,
         local_zone: ZoneId,
     ) -> Result<BrowserHost, JsValue> {
-        let me = ch_status().await?.as_string().unwrap_or_default();
-        if me.is_empty() {
+        let node = ch_status().await?.as_string().unwrap_or_default();
+        if node.is_empty() {
             return Err(JsValue::from_str("status returned no node_id"));
         }
+        // Per-tab game identity. Every browser reaches the mesh through the SAME ce node
+        // (the relay's, via the ce-serve bridge), so `ch_status` returns one shared
+        // node id for all tabs. If we used it directly as the player/quorum identity,
+        // every player — you and each buddy — would collapse onto one body and one
+        // quorum voice. So we derive a per-tab id: the node id plus a random suffix,
+        // making each tab a distinct player while keeping the originating node visible.
+        let suffix = (js_sys::Math::random() * (u32::MAX as f64)) as u32;
+        let me = format!("{node}-{suffix:08x}");
 
         let state = Rc::new(RefCell::new(HostState {
             me,
@@ -216,12 +252,23 @@ impl BrowserHost {
             (s.session.clone(), interest, to_build)
         };
         let _ = interest;
+
+        // Subscribe every new zone's topics in one concurrent fan-out (not 3 awaited
+        // round trips per zone), so the player can join almost immediately instead of
+        // after tens of seconds of serial subscribes.
+        let mut topics: Vec<String> = Vec::with_capacity(to_build.len() * 3);
+        for &zone in &to_build {
+            topics.push(topic::zone_input(&session, zone));
+            topics.push(topic::zone_proof(&session, zone));
+            topics.push(topic::zone_state(&session, zone));
+        }
+        if !topics.is_empty() {
+            let json = serde_json::to_string(&topics).unwrap_or_else(|_| "[]".to_string());
+            ch_subscribe_many(&json).await?;
+        }
+
         for zone in to_build {
             let in_topic = topic::zone_input(&session, zone);
-            ch_subscribe(&in_topic).await?;
-            ch_subscribe(&topic::zone_proof(&session, zone)).await?;
-            ch_subscribe(&topic::zone_state(&session, zone)).await?;
-
             let mut s = self.state.borrow_mut();
             let geometry = build_zone_geometry(&s.pack.worldgen, zone);
             let mut world = World::new(geometry, s.content());
@@ -250,6 +297,40 @@ impl BrowserHost {
             (topic::zone_input(&s.session, zone), encode_msg(&ReplicaMsg::Input(ti)))
         };
         let _ = ch_publish(&topic_name, &hex).await;
+    }
+
+    /// Ensure the local player is actually present, (re)issuing the Join — scheduled at
+    /// `current + INPUT_DELAY` off the *live* tick and published to the zone — until the
+    /// sim has spawned the body. A no-op once joined (and apply() ignores a duplicate
+    /// Join), so it's safe to call every frame.
+    ///
+    /// This self-heals the otherwise-flaky first spawn: the async connect (subscribing
+    /// every AOI zone over the bridge) can take well over the `MAX_CATCHUP` window, so
+    /// the one Join scheduled during `connect` is often fast-forwarded away before the
+    /// first `advance`. Re-issuing from the frame loop schedules it against the current
+    /// tick, where it lands inside the catch-up window and reliably spawns the player.
+    pub fn ensure_joined(&self) {
+        let (topic_name, hex) = {
+            let mut s = self.state.borrow_mut();
+            let zone = s.local_zone;
+            let already = s
+                .zones
+                .get(&zone)
+                .and_then(|zr| zr.replica.world().player_entity(&s.me))
+                .is_some();
+            if already {
+                return;
+            }
+            let seq = next_seq(&mut s);
+            let me = s.me.clone();
+            let join = ReplicaInput::Join { team_pref: None, name: String::new() };
+            let ti = match s.zones.get_mut(&zone) {
+                Some(zr) => zr.replica.schedule_local(me, seq, join),
+                None => return,
+            };
+            (topic::zone_input(&s.session, zone), encode_msg(&ReplicaMsg::Input(ti)))
+        };
+        spawn_publish(topic_name, hex);
     }
 
     /// Submit this player's input for the current tick: schedule it locally at the
@@ -377,6 +458,116 @@ impl BrowserHost {
         let s = self.state.borrow();
         let me = s.me.clone();
         s.zones.get(&s.local_zone).and_then(|zr| zr.replica.world().player_entity(&me))
+    }
+
+    /// How many zones this tab currently hosts (its area of interest). The client uses
+    /// this to notice when the hosted set changes and the visible terrain must rebuild.
+    pub fn hosted_zone_count(&self) -> usize {
+        self.state.borrow().zones.len()
+    }
+
+    /// The CPU-side render meshes for every hosted zone, extracted from the same
+    /// world-space terrain SDF the collision is built from (so what you see is what you
+    /// walk on). The client uploads these to the GPU via [`crate::mesh_gpu::GpuMesh`].
+    /// `res` is the surface-extraction grid resolution per axis (higher = finer, costlier).
+    pub fn zone_render_meshes(&self, res: usize) -> Vec<arena_procgen::mesh::Mesh> {
+        let s = self.state.borrow();
+        let mut zones: Vec<ZoneId> = s.zones.keys().copied().collect();
+        // Deterministic order so successive rebuilds are stable.
+        zones.sort_by_key(|z| (z.x, z.z));
+        zones
+            .iter()
+            .map(|z| arena_procgen::world::generate_zone_mesh(&s.pack.worldgen, *z, res))
+            .collect()
+    }
+
+    /// The hosted zones, the player's local zone first then the rest in a stable order.
+    /// The client extracts terrain one zone per frame in this order, so the zone you
+    /// stand in renders immediately and the neighbours stream in without one giant
+    /// boot hitch (extracting all nine at once froze the first frames for seconds,
+    /// which is what delayed the spawn).
+    pub fn hosted_zones_local_first(&self) -> Vec<ZoneId> {
+        let s = self.state.borrow();
+        let local = s.local_zone;
+        let mut zones: Vec<ZoneId> = s.zones.keys().copied().collect();
+        zones.sort_by_key(|z| (*z != local, z.x, z.z));
+        zones
+    }
+
+    /// Extract the render mesh for a single hosted zone (the heavy surface-nets pass for
+    /// just that zone), from the same terrain field its collision is built from.
+    pub fn zone_render_mesh(&self, zone: ZoneId, res: usize) -> arena_procgen::mesh::Mesh {
+        let s = self.state.borrow();
+        arena_procgen::world::generate_zone_mesh(&s.pack.worldgen, zone, res)
+    }
+
+    /// Push the live authoritative state into the page HUD overlay (see the `ch_hud`
+    /// shim). This is the one place the frontend learns what the backend simulation
+    /// holds: the local mage's health/armor, where they stand, how many other players
+    /// are in view, and how many zones this tab is hosting. Cheap and side-effect-free
+    /// on the sim, so the frame loop can call it on a light cadence.
+    pub fn publish_hud(&self) {
+        let s = self.state.borrow();
+        let zones = s.zones.len();
+
+        // The local player's authoritative entity, if it has spawned yet.
+        let local = s.zones.get(&s.local_zone).and_then(|zr| {
+            let w = zr.replica.world();
+            w.player_entity(&s.me).and_then(|id| w.entities().get(&id).cloned())
+        });
+
+        // Count players visible across the hosted area of interest.
+        let mut players = 0usize;
+        for zr in s.zones.values() {
+            for e in zr.replica.world().entities().values() {
+                if e.kind == arena_protocol::entity::EntityKind::Player {
+                    players += 1;
+                }
+            }
+        }
+        let peers = players.saturating_sub(if local.is_some() { 1 } else { 0 });
+
+        let (status, hp, hp_frac, ar_frac, coord, dead) = match &local {
+            Some(e) => {
+                let hp = e.health.max(0);
+                let coord = format!("{:.0}, {:.0}, {:.0}", e.pos.x, e.pos.y, e.pos.z);
+                let dead = !e.is_alive();
+                let status = if dead {
+                    "you have fallen".to_string()
+                } else if peers > 0 {
+                    format!("hosting {zones} zones · {peers} nearby")
+                } else {
+                    format!("hosting {zones} zones · exploring")
+                };
+                (
+                    status,
+                    hp.to_string(),
+                    (hp as f32 / 100.0).clamp(0.0, 1.0),
+                    (e.armor.max(0) as f32 / 100.0).clamp(0.0, 1.0),
+                    coord,
+                    dead,
+                )
+            }
+            None => (
+                "entering Cerena…".to_string(),
+                "—".to_string(),
+                1.0,
+                0.0,
+                String::new(),
+                false,
+            ),
+        };
+
+        let payload = serde_json::json!({
+            "status": status,
+            "hp": hp,
+            "hp_frac": hp_frac,
+            "ar_frac": ar_frac,
+            "coord": coord,
+            "peers": if peers > 0 { format!("{peers} mage(s) near") } else { String::new() },
+            "dead": dead,
+        });
+        ch_hud(&payload.to_string());
     }
 }
 
