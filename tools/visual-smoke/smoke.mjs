@@ -154,7 +154,21 @@ try {
   }
   writeFileSync(OUT, shot);
 
+  // Measure sustained frame rate (rAF count over a 2s window) — turns "feels laggy"
+  // into a number. Done after terrain has settled so it reflects the steady state.
+  const fps = await page.evaluate(() => new Promise((res) => {
+    let n = 0; const t0 = performance.now();
+    const tick = () => {
+      n++;
+      const el = performance.now() - t0;
+      if (el < 2000) requestAnimationFrame(tick);
+      else res(Math.round((n / el) * 1000));
+    };
+    requestAnimationFrame(tick);
+  }));
+
   // ---- checks ----
+  if (fps < 24) fail(`only ${fps} fps — render/sim is too slow to play`);
   if (!last.hasBridge) fail('no ce-serve mesh bridge (window.__ceNode) — not served through ce-serve?');
   const connected = [...logCounts.keys()].some((l) => l.includes('browser host connected'));
   if (!connected) fail('client never logged "browser host connected"');
@@ -170,7 +184,7 @@ try {
   // ---- report ----
   console.log('\n--- result ---');
   console.log(`bridge=${last.hasBridge} connected=${connected} spawned=${spawned} (${spawnSecs}s)`);
-  console.log(`status="${last.status}" hp=${last.hp} coord="${last.coord}" peers="${last.peers}"`);
+  console.log(`status="${last.status}" hp=${last.hp} coord="${last.coord}" peers="${last.peers}" fps=${fps}`);
   if (pix.skyFraction != null) console.log(`render: sky=${(pix.skyFraction * 100).toFixed(1)}% distinctColors=${pix.distinctColors} (${pix.w}x${pix.h})`);
   console.log(`screenshot → ${OUT}`);
   console.log('\nnotable console lines:');

@@ -23,7 +23,7 @@ use arena_content::worldgen::{BiomeDef, StructureDef, WorldGenParams};
 use arena_protocol::world::{Aabb, ZoneId, WORLD_CEIL_M, WORLD_FLOOR_M, ZONE_SIZE_M};
 use glam::Vec3;
 
-use crate::mesh::{surface_nets, Mesh};
+use crate::mesh::Mesh;
 use crate::noise_eval::{fbm, sample_layer, Rng};
 use crate::sdf::op_subtract_smooth;
 
@@ -99,55 +99,74 @@ pub fn zone_field<'a>(
     }
 }
 
-/// The tight vertical band a zone's terrain occupies: the full horizontal extent, but
-/// only `[min_relief - below, max_relief + above]` vertically (clamped to the world
-/// floor/ceiling). Concentrating the extraction grid on this slab is what turns the
-/// coarse, slivery full-height extraction into a smooth surface and aligns the render
-/// mesh with the collision heightfield.
-fn terrain_band_bounds(params: &WorldGenParams, zone: ZoneId) -> Aabb {
-    const GRID: usize = 10; // height probes per axis — cheap, just for the min/max
-    const BELOW_M: f32 = 24.0; // headroom under the surface (cave mouths, overhangs)
-    const ABOVE_M: f32 = 8.0; // headroom over the highest relief
-
+/// Generate the renderable terrain mesh for a zone as a **heightfield grid**: one
+/// vertex per `(x, z)` lattice point at `y = terrain_height(x, z)`, two triangles per
+/// cell. `res` is the grid resolution (cells per axis); the mesh has `(res+1)^2` verts.
+///
+/// This is deliberately NOT the SDF/surface-nets path the organic meshes use. The
+/// terrain is a heightfield, and meshing it directly fixes the things extracting an SDF
+/// over a tall box got wrong:
+///
+/// * **Seamless across zones.** Adjacent zones sample the *shared edge* at identical
+///   world `(x, z)` (the lattice spans `x0..=x0+ZONE_SIZE_M` inclusive), so they emit
+///   identical boundary vertices — no cracks, no zones stacked at mismatched heights.
+/// * **Matches collision.** The surface is exactly `terrain_height`, the same function
+///   [`generate_zone_collision`] builds its columns from, so you stand on what you see
+///   instead of falling through it.
+/// * **Cheap.** `O(res^2)` height samples instead of `O(res^3)` field evaluations, so
+///   extracting the area of interest no longer hitches the browser at start-up.
+/// * **No clipping.** Every point is the real surface height — no thin extraction band
+///   to clip peaks into floating flat shards.
+///
+/// Vertices are tinted by biome (the client overlays the full material on top) and
+/// carry analytic gradient normals so lighting is smooth and curvature-continuous.
+/// Caves/overhangs are not represented here (the surface is single-valued); the SDF
+/// [`zone_field`] remains for volumetric uses.
+pub fn generate_zone_mesh(params: &WorldGenParams, zone: ZoneId, res: usize) -> Mesh {
+    let res = res.max(1);
+    let n = res + 1; // vertices per axis
     let x0 = zone.x as f32 * ZONE_SIZE_M;
     let z0 = zone.z as f32 * ZONE_SIZE_M;
-    let step = ZONE_SIZE_M / GRID as f32;
-    let (mut hmin, mut hmax) = (f32::INFINITY, f32::NEG_INFINITY);
-    for iz in 0..=GRID {
-        for ix in 0..=GRID {
-            let h = terrain_height(params, x0 + ix as f32 * step, z0 + iz as f32 * step);
-            hmin = hmin.min(h);
-            hmax = hmax.max(h);
+    let step = ZONE_SIZE_M / res as f32;
+
+    let mut mesh = Mesh::default();
+    mesh.positions.reserve(n * n);
+    mesh.normals.reserve(n * n);
+    mesh.uvs.reserve(n * n);
+    mesh.colors.reserve(n * n);
+
+    for iz in 0..n {
+        for ix in 0..n {
+            let x = x0 + ix as f32 * step;
+            let z = z0 + iz as f32 * step;
+            let y = terrain_height(params, x, z);
+
+            // Analytic normal from the height gradient (central differences). Sampling
+            // the world-space height (not the per-zone grid) keeps normals continuous
+            // across zone seams too.
+            let e = step.max(0.5);
+            let dhx = terrain_height(params, x + e, z) - terrain_height(params, x - e, z);
+            let dhz = terrain_height(params, x, z + e) - terrain_height(params, x, z - e);
+            let normal = Vec3::new(-dhx, 2.0 * e, -dhz).normalize_or_zero();
+
+            let biome = biome_at(params, Vec3::new(x, y, z));
+            let c = biome.fog_color;
+
+            mesh.positions.push([x, y, z]);
+            mesh.normals.push(normal.to_array());
+            mesh.uvs.push([x * 0.05, z * 0.05]);
+            mesh.colors.push([c[0], c[1], c[2], 1.0]);
         }
     }
-    let lo = (hmin - BELOW_M).max(WORLD_FLOOR_M);
-    let hi = (hmax + ABOVE_M).min(WORLD_CEIL_M).max(lo + 1.0);
-    Aabb::new(Vec3::new(x0, lo, z0), Vec3::new(x0 + ZONE_SIZE_M, hi, z0 + ZONE_SIZE_M))
-}
 
-/// Generate the renderable mesh for a zone by extracting its terrain SDF at `res^3`
-/// resolution. Vertices are tinted by their biome so the raw mesh already carries a
-/// mood even before the client applies the full material. Clients use this; the server
-/// does not need it.
-pub fn generate_zone_mesh(params: &WorldGenParams, zone: ZoneId, res: usize) -> Mesh {
-    let field = zone_field(params, zone);
-    // Extract only the vertical band the terrain actually occupies, not the full
-    // ~320 m floor-to-ceiling box. Sampling the surface height on a coarse grid gives
-    // the min/max relief in this zone; the cubic `res` grid is then spent across that
-    // much thinner slab, so the surface is finely sampled (no slivers) and the render
-    // mesh tracks the `terrain_height`/collision columns closely (so "standing on the
-    // collision ground" == "standing on the visible ground"). A margin below captures
-    // cave mouths; a small margin above leaves headroom for the displaced surface.
-    let bounds = terrain_band_bounds(params, zone);
-    let mut mesh = surface_nets(&field, bounds, res, 0.0);
-
-    // Tint each vertex by its biome's fog colour as a cheap base colour. The client
-    // overlays the biome's actual surface material on top via triplanar mapping.
-    for (i, p) in mesh.positions.iter().enumerate() {
-        let pos = Vec3::from_array(*p);
-        let biome = biome_at(params, pos);
-        let c = biome.fog_color;
-        mesh.colors[i] = [c[0], c[1], c[2], 1.0];
+    // Two triangles per cell. Winding is consistent; the surface pipeline renders it
+    // double-sided so winding never hides the ground, and normals are analytic.
+    let idx = |ix: usize, iz: usize| (iz * n + ix) as u32;
+    for iz in 0..res {
+        for ix in 0..res {
+            let (a, b, c, d) = (idx(ix, iz), idx(ix + 1, iz), idx(ix + 1, iz + 1), idx(ix, iz + 1));
+            mesh.indices.extend_from_slice(&[a, b, c, a, c, d]);
+        }
     }
 
     mesh
@@ -159,7 +178,10 @@ pub fn generate_zone_mesh(params: &WorldGenParams, zone: ZoneId, res: usize) -> 
 /// good enough for broad-phase collision; caves are not represented (acceptable for a
 /// conservative ground collider).
 pub fn generate_zone_collision(params: &WorldGenParams, zone: ZoneId) -> Vec<Aabb> {
-    const GRID: usize = 16; // columns per axis
+    // Columns per axis. Finer than the render grid was — coarse 8 m columns let a
+    // player clip off the stepped edge of the smooth surface and fall through; 4 m
+    // columns track the heightfield closely enough to stand on.
+    const GRID: usize = 32;
     let mut out = Vec::with_capacity(GRID * GRID);
 
     let x0 = zone.x as f32 * ZONE_SIZE_M;
@@ -347,6 +369,34 @@ mod tests {
                 "zone ({zx},{zz}) produced no terrain — caves opened the surface to sky"
             );
         }
+    }
+
+    /// Adjacent zones must tile seamlessly: the shared edge sampled from either side
+    /// yields identical vertex positions, so there are no cracks or zones sitting at
+    /// mismatched heights. Regression for the "chunks not seamless / stacked weirdly"
+    /// report.
+    #[test]
+    fn adjacent_zones_share_their_edge() {
+        let wg = arena_content::default_pack().worldgen;
+        let res = 16;
+        let left = generate_zone_mesh(&wg, ZoneId::new(0, 0), res);
+        let right = generate_zone_mesh(&wg, ZoneId::new(1, 0), res);
+        // The right edge of zone (0,0) is world x == ZONE_SIZE_M; the left edge of
+        // zone (1,0) is the same x. Collect each side's edge vertices and compare.
+        let edge = |m: &Mesh, want_x: f32| {
+            let mut v: Vec<[f32; 3]> = m
+                .positions
+                .iter()
+                .copied()
+                .filter(|p| (p[0] - want_x).abs() < 1e-3)
+                .collect();
+            v.sort_by(|a, b| a[2].partial_cmp(&b[2]).unwrap());
+            v
+        };
+        let a = edge(&left, ZONE_SIZE_M);
+        let b = edge(&right, ZONE_SIZE_M);
+        assert_eq!(a.len(), res + 1, "expected one shared vertex per lattice row");
+        assert_eq!(a, b, "zone edge vertices differ — terrain is not seamless");
     }
 
     /// The rendered surface must sit at the height spawns/collision use, so a player

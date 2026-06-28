@@ -529,9 +529,13 @@ fn build_pipeline_inner(
         }),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
-            // Organic procgen meshes are wound CCW; cull backfaces for fill rate.
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
+            // Render double-sided. The terrain heightfield and organic meshes carry
+            // analytic normals, so culling buys little, and disabling it removes a whole
+            // class of bugs: terrain winding can never hide the ground, and standing at
+            // or just under the surface never shows see-through (back-culled) holes to
+            // the sky. Overdraw at these triangle counts is negligible.
+            cull_mode: None,
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
