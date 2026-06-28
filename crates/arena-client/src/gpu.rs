@@ -42,20 +42,23 @@ impl Gpu {
         // Backend selection differs by platform. On native we let wgpu pick the
         // platform-best (Vulkan/Metal/DX12); PRIMARY | GL covers all of them.
         //
-        // On wasm we force the **WebGL2** backend rather than WebGPU. wgpu 0.20's
-        // device request sends the `maxInterStageShaderComponents` limit, which the
-        // current WebGPU spec removed — Chrome 1xx rejects `requestDevice` with
-        // "limit ... is not recognized", so the WebGPU path fails on up-to-date
-        // browsers. WebGL2 sidesteps that entirely and is universally supported
-        // (Chrome/Firefox/Safari/Edge), and the renderer is already written to stay
-        // within `downlevel_webgl2` limits, so we lose nothing portable by using it.
+        // On wasm we prefer **WebGPU** and keep WebGL2 as the fallback. The old
+        // wgpu-0.20 limit bug (it sent `maxInterStageShaderComponents`, which the
+        // WebGPU spec removed, so Chrome rejected `requestDevice`) is gone on the
+        // modern wgpu line, so the WebGPU path works again — and it unlocks the
+        // HDR/compute-class features the renderer now uses. Browsers without WebGPU
+        // fall through to GL, and we still stay within `downlevel_webgl2` limits so
+        // that path keeps working too.
         #[cfg(target_arch = "wasm32")]
-        let backends = wgpu::Backends::GL;
+        let backends = wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL;
         #[cfg(not(target_arch = "wasm32"))]
         let backends = wgpu::Backends::PRIMARY | wgpu::Backends::GL;
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends,
-            ..Default::default()
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            display: None,
         });
 
         // An `Arc<Window>` converts into a `'static` surface target, so the surface
@@ -80,14 +83,17 @@ impl Gpu {
             wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("cerena-device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits,
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("cerena-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits,
+                // We request no experimental features.
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                // Let wgpu pick allocation behaviour; we have no special needs.
+                memory_hints: wgpu::MemoryHints::default(),
+                // No API-trace capture.
+                trace: wgpu::Trace::Off,
+            })
             .await
             .expect("request device");
 

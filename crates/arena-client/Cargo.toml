@@ -24,7 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 bincode.workspace = true
 bytemuck.workspace = true
-wgpu = "0.20"
+wgpu = "29"
 winit = "0.29"
 tracing.workspace = true
 
@@ -36,8 +36,8 @@ web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlE
 console_error_panic_hook = "0.1"
 tracing-wasm = "0.2"
 # Enable the WebGL2 backend so the client also runs on browsers without WebGPU.
-# (wgpu uses BROWSER_WEBGPU by default on wasm; "webgl" adds the GL fallback.)
-wgpu = { version = "0.20", features = ["webgl"] }
+# (wgpu prefers BROWSER_WEBGPU on wasm; "webgl" adds the GL fallback path.)
+wgpu = { version = "29", features = ["webgl"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.3"
