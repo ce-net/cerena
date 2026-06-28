@@ -67,8 +67,20 @@ function gpuArgs() {
   const hasDisplay = !!process.env.DISPLAY;
   const hasDri = existsSync('/dev/dri');
   if (hasDisplay && hasDri) {
-    // Real GPU through ANGLE — a spec-compliant WebGL2 context.
-    return { headful: true, args: ['--use-gl=angle', '--use-angle=gl', '--ignore-gpu-blocklist'] };
+    // Real GPU through ANGLE — a spec-compliant WebGL2 context — plus a Vulkan-backed
+    // WebGPU adapter (the renderer prefers WebGPU and only falls back to WebGL2). The
+    // unsafe-webgpu/Vulkan flags expose WebGPU in headless Chrome so this tool can test
+    // the WebGPU path; without them Chrome offers no WebGPU adapter on a server box.
+    return {
+      headful: true,
+      args: [
+        '--use-gl=angle',
+        '--use-angle=gl',
+        '--ignore-gpu-blocklist',
+        '--enable-unsafe-webgpu',
+        '--enable-features=Vulkan,WebGPU',
+      ],
+    };
   }
   // Software fallback.
   return {
