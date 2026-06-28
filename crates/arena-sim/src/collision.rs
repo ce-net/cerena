@@ -18,6 +18,8 @@ use glam::Vec3;
 
 use arena_protocol::world::{Aabb, Team};
 
+use crate::map::Terrain;
+
 /// Height of the head region, measured down from the top of the capsule. A hit
 /// landing within this band counts as a headshot.
 pub const HEAD_HEIGHT_M: f32 = 0.3;
@@ -64,6 +66,7 @@ pub fn resolve_move(
     half_height: f32,
     radius: f32,
     brushes: &[Aabb],
+    terrain: Option<&Terrain>,
 ) -> MoveResult {
     // 4 substeps is plenty at arena speeds (<15 m/s) vs 1 m thick walls.
     const SUBSTEPS: u32 = 4;
@@ -77,6 +80,30 @@ pub fn resolve_move(
 
     for _ in 0..SUBSTEPS {
         pos += vel * sdt;
+
+        // Heightfield ground: keep the capsule's feet on or above the terrain. We
+        // sample the surface under the centre and around the footprint and rest on the
+        // *highest* sample, so a capsule straddling a slope or ridge never sinks a
+        // corner through the ground. This is the analytic surface the render mesh is
+        // built from, so you stand exactly on what you see, on every node identically.
+        if let Some(t) = terrain {
+            let mut ground = t.height(pos.x, pos.z);
+            for (dx, dz) in [(radius, 0.0), (-radius, 0.0), (0.0, radius), (0.0, -radius)] {
+                ground = ground.max(t.height(pos.x + dx, pos.z + dz));
+            }
+            let feet = pos.y - half_height;
+            if feet < ground {
+                pos.y = ground + half_height;
+                if vel.y < 0.0 {
+                    vel.y = 0.0;
+                }
+                on_ground = true;
+                let n = t.normal(pos.x, pos.z);
+                if hit_normal.map_or(true, |hn: Vec3| n.y > hn.y) {
+                    hit_normal = Some(n);
+                }
+            }
+        }
 
         for _ in 0..DEPEN_PASSES {
             // Resolve the single deepest contact each pass; iterating handles the
@@ -389,6 +416,44 @@ pub fn wall_contact(
         }
     }
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::map::Terrain;
+
+    /// A capsule dropped onto the procedural terrain settles with its feet ON the
+    /// surface — never sinking below it (fall-through) and never hovering far above.
+    /// This is the heightfield-collision invariant the whole "robust collision" rests
+    /// on, checked against the shipped world at several spots.
+    #[test]
+    fn capsule_settles_on_terrain() {
+        let terrain = Terrain::new(arena_content::default_pack().worldgen);
+        let (hh, r, dt) = (0.9_f32, 0.4_f32, 1.0 / 64.0);
+        for &(x, z) in &[(40.0_f32, 70.0_f32), (10.0, 110.0), (-50.0, 30.0), (90.0, -20.0)] {
+            let g = terrain.height(x, z);
+            let mut pos = Vec3::new(x, g + 25.0, z);
+            let mut vel = Vec3::ZERO;
+            let mut grounded = false;
+            for _ in 0..300 {
+                vel.y += -20.0 * dt; // gravity, as the mover applies
+                let res = resolve_move(pos, vel, dt, hh, r, &[], Some(&terrain));
+                pos = res.pos;
+                vel = res.vel;
+                grounded = res.on_ground;
+            }
+            assert!(grounded, "capsule should be grounded at ({x},{z})");
+            // The footprint-max ground the resolver rests on.
+            let mut ground = terrain.height(pos.x, pos.z);
+            for (dx, dz) in [(r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)] {
+                ground = ground.max(terrain.height(pos.x + dx, pos.z + dz));
+            }
+            let feet = pos.y - hh;
+            assert!(feet >= ground - 0.05, "feet {feet:.2} sank below ground {ground:.2} at ({x},{z})");
+            assert!(feet <= ground + 0.25, "feet {feet:.2} hovering above ground {ground:.2} at ({x},{z})");
+        }
+    }
 }
 
 /// Translate a capsule by `delta`, stopping at the first blocking geometry. Used by

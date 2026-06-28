@@ -157,6 +157,7 @@ pub fn integrate_body(
     params: &BodyParams,
     dt: f32,
     brushes: &[Aabb],
+    terrain: Option<&crate::map::Terrain>,
 ) -> bool {
     body.vel.y += params.gravity * dt;
     if params.drag > 0.0 {
@@ -174,7 +175,7 @@ pub fn integrate_body(
             body.vel.z *= s;
         }
     }
-    let res = collision::resolve_move(body.pos, body.vel, dt, body.half_height, body.radius, brushes);
+    let res = collision::resolve_move(body.pos, body.vel, dt, body.half_height, body.radius, brushes, terrain);
     body.pos = res.pos;
     body.vel = res.vel;
     res.on_ground
@@ -357,7 +358,7 @@ mod tests {
         let mut body = KinematicBody { pos: Vec3::new(0.0, 10.0, 0.0), vel: Vec3::ZERO, radius: 0.4, half_height: 0.9 };
         let params = BodyParams::default();
         let before = body.pos.y;
-        integrate_body(&mut body, &params, 1.0 / 64.0, &[]);
+        integrate_body(&mut body, &params, 1.0 / 64.0, &[], None);
         assert!(body.pos.y < before, "an unsupported body should fall");
     }
 

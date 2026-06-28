@@ -14,6 +14,7 @@
 
 use glam::Vec3;
 
+use arena_content::worldgen::WorldGenParams;
 use arena_protocol::snapshot::GameEvent;
 
 /// Hard cap on live particles, so a frantic teamfight cannot unbound the buffer.
@@ -48,13 +49,24 @@ impl Particle {
 #[derive(Default)]
 pub struct ParticleSystem {
     particles: Vec<Particle>,
+    /// The world's terrain recipe, so particles collide with (settle on) the ground
+    /// using the *same* `surface_height` the sim and render mesh use. `None` = no
+    /// ground (particles just fall away, e.g. the flat native test arena).
+    terrain: Option<WorldGenParams>,
 }
 
 impl ParticleSystem {
     pub fn new() -> Self {
         Self {
             particles: Vec::with_capacity(1024),
+            terrain: None,
         }
+    }
+
+    /// Give the system the world's terrain so falling particles collide with the
+    /// ground instead of sinking through it. Uses the shared procgen heightfield.
+    pub fn set_terrain(&mut self, params: WorldGenParams) {
+        self.terrain = Some(params);
     }
 
     /// Live particle count (HUD/diagnostics).
@@ -69,10 +81,24 @@ impl ParticleSystem {
     /// Advance every particle by `dt` seconds and reap the dead ones. Cheap Euler
     /// integration — particles are cosmetic, never simulated authoritatively.
     pub fn update(&mut self, dt: f32) {
+        let terrain = self.terrain.as_ref();
         for p in &mut self.particles {
             p.vel.y -= p.gravity * dt;
             p.pos += p.vel * dt;
             p.life -= dt;
+
+            // Collide with the ground: settle on the surface (the same heightfield the
+            // sim collides against and the terrain mesh is built from) instead of
+            // falling through it. Sparks/embers skid to a stop where they land.
+            if let Some(params) = terrain {
+                let ground = arena_procgen::world::surface_height(params, p.pos.x, p.pos.z);
+                if p.pos.y < ground {
+                    p.pos.y = ground;
+                    p.vel.y = 0.0;
+                    p.vel.x *= 0.4; // friction skid, then the fade-out finishes it
+                    p.vel.z *= 0.4;
+                }
+            }
         }
         self.particles.retain(|p| p.life > 0.0);
     }

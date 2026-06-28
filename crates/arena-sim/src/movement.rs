@@ -20,6 +20,7 @@ use arena_protocol::input::{Buttons, InputFrame};
 use arena_protocol::world::Aabb;
 
 use crate::collision::{self, MoveResult};
+use crate::map::Terrain;
 
 // --- Locomotion tunables (metres, seconds, m/s) -----------------------------
 
@@ -154,6 +155,7 @@ pub fn move_player(
     dt: f32,
     on_ground_prev: bool,
     brushes: &[Aabb],
+    terrain: Option<&Terrain>,
     params: &MoveParams,
 ) -> MoveStatus {
     state.yaw = frame.yaw;
@@ -163,7 +165,7 @@ pub fn move_player(
     // (The MELEEING flag is a one-tick pulse the world's melee path sets *before*
     // this sweep runs; the base move leaves it untouched so it clears next tick.)
     if params.fly {
-        return fly_move(state, frame, dt, brushes, params);
+        return fly_move(state, frame, dt, brushes, terrain, params);
     }
 
     // --- Crouch: resize the capsule, keeping the feet planted -----------------
@@ -236,7 +238,7 @@ pub fn move_player(
         vel: new_vel,
         on_ground: grounded,
         ..
-    } = collision::resolve_move(state.pos, vel, dt, half_height, PLAYER_RADIUS, brushes);
+    } = collision::resolve_move(state.pos, vel, dt, half_height, PLAYER_RADIUS, brushes, terrain);
 
     state.pos = new_pos;
     state.vel = new_vel;
@@ -266,6 +268,7 @@ fn fly_move(
     frame: &InputFrame,
     dt: f32,
     brushes: &[Aabb],
+    terrain: Option<&Terrain>,
     params: &MoveParams,
 ) -> MoveStatus {
     let look = view_dir(frame.yaw, frame.pitch);
@@ -303,7 +306,7 @@ fn fly_move(
 
     let half_height = half_height_of(state);
     let MoveResult { pos: new_pos, vel: new_vel, on_ground, .. } =
-        collision::resolve_move(state.pos, vel, dt, half_height, PLAYER_RADIUS, brushes);
+        collision::resolve_move(state.pos, vel, dt, half_height, PLAYER_RADIUS, brushes, terrain);
     vel = new_vel;
     state.pos = new_pos;
     state.vel = vel;
@@ -503,7 +506,7 @@ mod tests {
         let params = MoveParams { fly: true, fly_speed: 16.0, fly_accel: 22.0, ..Default::default() };
         let f = frame(Buttons::FORWARD, 0.0, 0.0);
         for _ in 0..30 {
-            move_player(&mut s, &f, 1.0 / 64.0, false, &[], &params);
+            move_player(&mut s, &f, 1.0 / 64.0, false, &[], None, &params);
         }
         assert!(s.vel.z < -5.0, "flight should carry the wizard forward (-Z), got {:?}", s.vel);
         assert!(s.vel.y.abs() < 0.5, "flight must suppress gravity, vel.y={}", s.vel.y);
@@ -516,7 +519,7 @@ mod tests {
         let params = MoveParams { fly: true, fly_speed: 16.0, fly_accel: 22.0, ..Default::default() };
         let f = frame(0, 0.0, 0.0);
         for _ in 0..60 {
-            move_player(&mut s, &f, 1.0 / 64.0, false, &[], &params);
+            move_player(&mut s, &f, 1.0 / 64.0, false, &[], None, &params);
         }
         assert!(s.vel.length() < 1.0, "with no input flight eases to a hover, got {:?}", s.vel);
     }
@@ -549,7 +552,7 @@ mod tests {
         let params = MoveParams { climb_speed: 4.0, ..Default::default() };
         let f = frame(Buttons::FORWARD, 0.0, 0.0);
         let before = s.pos.y;
-        move_player(&mut s, &f, 1.0 / 64.0, false, &[], &params);
+        move_player(&mut s, &f, 1.0 / 64.0, false, &[], None, &params);
         assert!(s.pos.y > before, "climbing should raise the capsule");
         assert!(s.flags.has(EntityFlags::CLIMBING), "the climbing flag should be set");
     }

@@ -709,6 +709,7 @@ impl World {
 
     fn movement_step(&mut self, now: Tick, player_ids: &[EntityId], events: &mut Vec<GameEvent>) {
         let brushes = self.map.brushes.clone();
+        let terrain = self.map.terrain.clone();
         for id in player_ids {
             let alive = self.entities.get(id).map(|e| e.is_alive()).unwrap_or(false);
             if !alive {
@@ -886,7 +887,7 @@ impl World {
             // --- Base locomotion sweep ----------------------------------------
             let status = {
                 let e = self.entities.get_mut(id).unwrap();
-                movement::move_player(e, &frame, TICK_DT, on_ground_prev, &brushes, &params)
+                movement::move_player(e, &frame, TICK_DT, on_ground_prev, &brushes, terrain.as_ref(), &params)
             };
 
             // Wall-run is a transient pose flag (move_player owns the rest).
@@ -1248,6 +1249,7 @@ impl World {
 
     fn integrate_projectiles(&mut self, now: Tick, events: &mut Vec<GameEvent>) {
         let brushes = self.map.brushes.clone();
+        let terrain = self.map.terrain.clone();
         let ids: Vec<EntityId> = self.projectiles.keys().copied().collect();
         let mut remove: Vec<EntityId> = Vec::new();
         // Continuations to run after we finish mutating the projectile set.
@@ -1278,8 +1280,15 @@ impl World {
             let len = step.length();
             let dir = if len > 1e-6 { step / len } else { vel.normalize_or_zero() };
 
-            // Find the nearest contact: world geometry or an enemy capsule.
+            // Find the nearest contact: world geometry, the terrain ground, or an
+            // enemy capsule. Projectiles must stop/detonate on the ground (they used to
+            // sail straight through the heightfield since it wasn't a brush).
             let mut contact_t = crate::collision::raycast_aabbs(old, dir, len.max(1e-4), &brushes).map(|(t, _)| t);
+            if let Some(t) = terrain.as_ref().and_then(|tr| tr.raycast(old, dir, len.max(1e-4))) {
+                if contact_t.map_or(true, |c| t < c) {
+                    contact_t = Some(t);
+                }
+            }
             let mut victim: Option<EntityId> = None;
             for (cid, _e) in self.entities.iter() {
                 if *cid == proj.ctx.caster || self.entities[cid].kind != EntityKind::Player {
@@ -1744,7 +1753,16 @@ impl World {
         caster_team: Team,
     ) -> Vec<(EntityId, Vec3)> {
         let dir = dir.normalize_or_zero();
-        let wall_t = crate::collision::raycast_aabbs(origin, dir, range, &self.map.brushes).map(|(t, _)| t);
+        // Hitscan is blocked by world geometry AND by the terrain ground, whichever is
+        // nearer, so you can't shoot a target through a hill.
+        let wall_t = {
+            let brush = crate::collision::raycast_aabbs(origin, dir, range, &self.map.brushes).map(|(t, _)| t);
+            let ground = self.map.terrain.as_ref().and_then(|tr| tr.raycast(origin, dir, range));
+            match (brush, ground) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            }
+        };
         let mut hits: Vec<(f32, EntityId, Vec3)> = Vec::new();
         for (id, e) in &self.entities {
             if e.kind != EntityKind::Player || !e.is_alive() {

@@ -169,6 +169,9 @@ impl App {
                     app.local_node = h.node_id_string();
                     app.host = Some(h);
                     app.joined = true;
+                    // Let cosmetic particles collide with the same procedural ground the
+                    // sim and terrain mesh use, so sparks settle on the surface.
+                    app.particles.set_terrain(arena_content::default_pack().worldgen);
                 }
                 Err(e) => tracing::error!("browser host connect failed (is this served via ce-serve?): {e:?}"),
             }

@@ -13,6 +13,61 @@ use arena_protocol::world::{
     Aabb, MapId, SpawnPoint, Team, ZoneId, WORLD_CEIL_M, WORLD_FLOOR_M, ZONE_SIZE_M,
 };
 
+/// The shared, deterministic ground surface: the procedural heightfield. Every node
+/// builds this from the *same* [`WorldGenParams`], and it is world-space continuous
+/// (not chopped per zone), so collision against it is identical on every replica and
+/// seamless across zone borders — the multiplayer-safe source of truth. It is the
+/// exact same `surface_height` the client's render mesh is built from, so you collide
+/// with what you see (no falling through, no floating).
+#[derive(Debug, Clone)]
+pub struct Terrain {
+    params: WorldGenParams,
+}
+
+impl Terrain {
+    pub fn new(params: WorldGenParams) -> Terrain {
+        Terrain { params }
+    }
+
+    /// Ground surface height (metres) at world `(x, z)`.
+    pub fn height(&self, x: f32, z: f32) -> f32 {
+        arena_procgen::world::surface_height(&self.params, x, z)
+    }
+
+    /// Upward surface normal at `(x, z)`, from the height gradient (central diff).
+    pub fn normal(&self, x: f32, z: f32) -> Vec3 {
+        let e = 0.5;
+        let dhx = self.height(x + e, z) - self.height(x - e, z);
+        let dhz = self.height(x, z + e) - self.height(x, z - e);
+        Vec3::new(-dhx, 2.0 * e, -dhz).normalize_or_zero()
+    }
+
+    /// First crossing of the ground by a ray within `max_dist`, returned as the
+    /// distance `t` (the hit point is `origin + dir*t`). Marches the heightfield and
+    /// detects the step from above-surface to below-surface. `dir` need not be unit;
+    /// `t` is in `dir` lengths if it isn't, so pass a normalised `dir` for metres.
+    pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<f32> {
+        const STEP: f32 = 0.5;
+        let mut t = 0.0_f32;
+        let mut prev = origin.y - self.height(origin.x, origin.z); // >0 above ground
+        while t < max_dist {
+            t = (t + STEP).min(max_dist);
+            let p = origin + dir * t;
+            let cur = p.y - self.height(p.x, p.z);
+            if prev > 0.0 && cur <= 0.0 {
+                // Linear-interpolate the crossing within the last step for accuracy.
+                let frac = prev / (prev - cur);
+                return Some((t - STEP + STEP * frac).clamp(0.0, max_dist));
+            }
+            prev = cur;
+            if t >= max_dist {
+                break;
+            }
+        }
+        None
+    }
+}
+
 /// The compiled, immutable definition of one arena.
 #[derive(Debug, Clone)]
 pub struct MapDef {
@@ -20,9 +75,14 @@ pub struct MapDef {
     pub id: MapId,
     /// The outer playable bound. Anything outside is a hard kill / clamp region.
     pub bounds: Aabb,
-    /// Solid static geometry: floor, walls, crates, ramps. The collision and
-    /// raycast routines treat every entry uniformly.
+    /// Solid static geometry: walls, crates, ramps, built structures. The collision
+    /// and raycast routines treat every entry uniformly. The *ground* is not a brush
+    /// in a procedural world — it is [`MapDef::terrain`].
     pub brushes: Vec<Aabb>,
+    /// The procedural ground heightfield, if this map has one. `None` for the flat
+    /// brush-floored test arena. Collision clamps to this surface, so the ground is
+    /// exact, seamless and identical on every node.
+    pub terrain: Option<Terrain>,
     /// Baked spawn points, tagged by team.
     pub spawns: Vec<SpawnPoint>,
 }
@@ -115,6 +175,7 @@ impl MapDef {
                 Vec3::new(32.0, WORLD_CEIL_M, 32.0),
             ),
             brushes,
+            terrain: None, // flat brush floor; no procedural heightfield
             spawns,
         }
     }
@@ -184,11 +245,13 @@ impl MapDef {
 /// synthesised in a ring around the zone centre, lifted just above the highest
 /// central terrain column.
 pub fn build_zone_geometry(worldgen: &WorldGenParams, zone: ZoneId) -> MapDef {
-    let brushes = arena_procgen::world::generate_zone_collision(worldgen, zone);
-    if brushes.is_empty() {
-        // Degenerate recipe (e.g. an empty/dev pack): fall back to the sealed test arena.
-        return MapDef::test_arena();
-    }
+    // The ground is the analytic heightfield (see [`Terrain`]) — exact, seamless across
+    // zones and identical on every node — not a grid of approximating AABB columns
+    // (those stepped against the smooth render surface and let players clip off the
+    // edges and fall through). Built structures, when worldgen grows them, go in
+    // `brushes`; for now a procedural zone is pure terrain.
+    let terrain = Terrain::new(worldgen.clone());
+    let brushes: Vec<Aabb> = Vec::new();
 
     let center = zone.center();
 
@@ -231,5 +294,11 @@ pub fn build_zone_geometry(worldgen: &WorldGenParams, zone: ZoneId) -> MapDef {
         ),
     );
 
-    MapDef { id: MapId(format!("zone_{}", zone.token())), bounds, brushes, spawns }
+    MapDef {
+        id: MapId(format!("zone_{}", zone.token())),
+        bounds,
+        brushes,
+        terrain: Some(terrain),
+        spawns,
+    }
 }
