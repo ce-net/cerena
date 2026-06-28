@@ -70,7 +70,7 @@ fastrand = "2"
 
 # Local SDK (mesh transport, identity, economy). Path dep by design.
 # The package is named `ce-rs`; we import it as `ce_rs`, so rename explicitly.
-ce_rs = { path = "../ce-rs", package = "ce-rs", features = ["serve"] }
+ce_rs = { git = "https://github.com/ce-net/ce-rs", package = "ce-rs", features = ["serve"] }
 
 [profile.release]
 opt-level = 3
